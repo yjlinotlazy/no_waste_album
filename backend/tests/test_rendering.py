@@ -1,0 +1,47 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from PIL import Image
+
+from backend.rendering import Renderer
+
+
+class RenderingTests(unittest.TestCase):
+    def test_render_preserves_source_and_applies_crop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "photo.jpg"
+            Image.new("RGB", (100, 80), (100, 120, 140)).save(source)
+            destination = root / "exports" / "edit.jpg"
+            Renderer(root).render("photo.jpg", {"crop": {"x": 0, "y": 0, "width": .5, "height": .5}}, destination)
+
+            with Image.open(source) as original, Image.open(destination) as edited:
+                self.assertEqual(original.size, (100, 80))
+                self.assertEqual(edited.size, (50, 40))
+
+    def test_raw_source_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw" / "photo.jpg"
+            raw.parent.mkdir(); Image.new("RGB", (10, 10)).save(raw)
+            with self.assertRaises(ValueError):
+                Renderer(root).render("raw/photo.jpg", {}, root / "out.jpg")
+
+    def test_kindle_filter_writes_16_level_grayscale_png(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Image.new("RGB", (32, 16), (123, 87, 42)).save(root / "photo.jpg")
+            destination = root / "kindle" / "photo_16gray.png"
+            Renderer(root).render("photo.jpg", {"filter": "kindle_16gray"}, destination)
+            with Image.open(destination) as edited:
+                self.assertEqual(edited.format, "PNG")
+                self.assertEqual(edited.mode, "L")
+                self.assertEqual(edited.size, (600, 800))
+                values = set(edited.getdata())
+                self.assertLessEqual(len(values), 16)
+                self.assertTrue(all(value % 17 == 0 for value in values))
+
+
+if __name__ == "__main__":
+    unittest.main()

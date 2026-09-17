@@ -1,5 +1,8 @@
 # No Waste Album local POC configuration
-library: /home/yli/Dropbox/Photos
-data_dir: /home/yli/.local/share/no_waste_album
+library: /path/to/your/photos
+data_dir: /path/to/your/photos/no_waste_album
 host: 127.0.0.1
 port: 7008
+page_size: 5
+dev_reload: true
+kindle_gen7_output: /path/to/your/kindle_gen7_output

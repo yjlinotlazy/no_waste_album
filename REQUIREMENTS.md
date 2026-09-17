@@ -49,6 +49,12 @@ The original image remains the source of truth. Editing and organization metadat
 3. The system shall assign each asset a stable internal identifier.
 4. Re-indexing shall be idempotent: the same file must not create duplicate library records.
 5. The system shall detect missing, moved, or changed source files and expose their status to the user.
+6. Normal synchronization shall be optimized for libraries where new files are appended and older files are rarely modified.
+7. 牛马模式 shall provide an explicit full **Re-scan** action for older-file changes, external deletions, moves, and catalog recovery.
+8. The system shall show the timestamp, scope, and result of the last normal synchronization and full re-scan.
+9. Files deleted outside the app may remain as stale/missing catalog entries until a full re-scan, but shall not be presented as valid available images.
+10. Files deleted through the app shall update catalog and trash state immediately.
+11. The catalog and file browser shall always exclude directories named `raw/` and all files and subdirectories beneath them.
 
 ### 5.2 Non-destructive variants
 
@@ -80,6 +86,11 @@ The original image remains the source of truth. Editing and organization metadat
 6. Permanent deletion shall require an explicit **Clear Trash** action.
 7. The system shall clearly distinguish source assets, variants, and generated exports before deletion.
 8. The system must never permanently delete solely because an automated quality score is low.
+9. 牛马模式 shall provide a bulk-edit mode for selecting multiple images.
+10. Bulk edit shall provide **删除** and **隐藏** actions.
+11. 删除 shall mark selected images as recoverable trash state in the catalog without moving or modifying the original files.
+12. 隐藏 shall exclude selected images from normal browsing without deleting them.
+13. The UI shall provide **显示隐藏图片**; when active, its label shall change to **不显示隐藏图片**.
 
 ### 5.5 Duplicate and similarity detection
 

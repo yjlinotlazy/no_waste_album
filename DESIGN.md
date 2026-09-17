@@ -17,13 +17,16 @@ Browser
   ▼
 Local backend service
   ├── API and mode authorization
-  ├── Asset and variant service
+  ├── Library catalog
+  ├── Metadata/domain service
   ├── Rendering service
   ├── Job manager
   │     ├── Image analysis pipeline
   │     ├── ML clustering pipeline
   │     └── Search indexing pipeline
-  ├── Search service
+  ├── Search/query service
+  ├── Telemetry service
+  ├── File-management service
   ├── External-app adapters
   └── Persistence layer
         ├── metadata database
@@ -34,7 +37,32 @@ Local backend service
 
 The browser is responsible for presentation and interaction. The backend owns all filesystem access, image processing, persistence, job execution, and authorization decisions.
 
-The application should be started as one local backend process that serves the frontend assets and exposes the API. The internal modules should still be separated so the frontend and backend can later be developed or deployed independently without changing the domain model.
+The application should be started as one local backend process that serves the frontend assets and exposes the API. This is a modular monolith, not a collection of networked microservices. Expensive pipelines may run in separate local worker processes, but they communicate through explicit job contracts.
+
+The internal modules should still be separated so the frontend and backend can later be developed or deployed independently without changing the domain model.
+
+### 2.1 Two indexing layers
+
+The design deliberately separates two different meanings of “indexing”:
+
+- **Library catalog:** a fast authoritative inventory of folders, paths, content fingerprints, basic metadata, and source-file status. It powers the file browser and should be updated by explicit scans or filesystem-watch events.
+- **Semantic search index:** a derived, versioned index of colors, objects, embeddings, structure, clusters, view statistics, and other search/recommendation signals. It is produced by on-demand pipelines and can be rebuilt.
+
+The catalog must remain useful even when semantic analysis has never run or is stale.
+
+### 2.2 Library change model
+
+The expected library behavior is mostly append-only: new photos and folders are normally added in chronological order, while older files are rarely modified. The catalog should optimize for this pattern.
+
+- **Normal sync:** check for newly added folders/files and lightweight metadata changes since the last successful scan. Do not perform a full historical scan on every startup or browse request.
+- **Explicit re-scan:** 牛马模式 provides a clearly labeled full re-scan for changes to older photos, external deletions, moves, or suspected catalog drift.
+- **In-app deletion:** deletion through the app updates the catalog and soft-trash state immediately. The original file remains in its original location and is not modified or moved.
+- **Bulk state changes:** bulk hide and trash operations are explicit catalog/domain commands; hidden assets remain available for deliberate inspection but are excluded from normal browse queries.
+- **External deletion:** files removed outside the app may remain as missing/stale catalog entries until the user runs a full re-scan. The UI should show their stale status rather than silently treating them as valid images.
+- **Ordering:** browsing and timeline views should prefer capture timestamp, then filesystem timestamp, then catalog insertion time as fallbacks.
+- **Excluded trees:** the catalog scanner must skip every directory named `raw/` and prune its entire subtree. Excluded files must not appear in the file browser, semantic index, recommendations, cleanup workflows, or view statistics.
+
+The catalog should record the last normal sync and last full re-scan, along with their scope and result, so the user knows how current it is.
 
 ## 3. Frontend design
 
@@ -42,7 +70,7 @@ The application should be started as one local backend process that serves the f
 
 - Library browser: thumbnails, filters, sorting, and pagination/virtualized scrolling.
 - Asset detail: large preview, source metadata, variants, analysis results, and related assets.
-- Variant editor: crop, color adjustment, and filter controls.
+- Variant editor: crop, color adjustment, white balance, and filter controls.
 - Cleanup workspace: low-quality candidates, duplicate groups, selection, trash, restore, and clear trash.
 - Search and discovery: metadata search, visual similarity, clusters, and hidden gems.
 - Job center: start jobs, show progress, failures, stale data, and retry/cancel controls.
@@ -80,25 +108,47 @@ Authorization should classify API operations as `read`, `operator_mutation`, or 
 
 ### 4.3 Asset service
 
-Owns asset discovery, fingerprinting, source-file status, metadata extraction, and relationships between source assets, variants, exports, and derived results.
+Owns asset relationships and delegates discovery to the library catalog. Asset identity must be based primarily on content fingerprint, not path, because files can move. Paths remain tracked locations and may change without creating a new asset.
 
-### 4.4 Variant and rendering service
+### 4.4 Library catalog
 
-Stores ordered edit operations as an edit recipe. A renderer applies the recipe to the immutable source at preview or export time. Rendered previews are cached using a key derived from source fingerprint, variant recipe, renderer version, and requested size/format.
+Owns recursive folder discovery, source-file fingerprints, basic file metadata, and missing/moved/changed-file detection. It should support append-optimized normal sync, explicit full re-scan, and a cached folder tree. It must not wait for semantic ML processing.
 
-### 4.5 Search service
+### 4.5 Metadata/domain service
 
-Translates user queries into metadata filters, feature comparisons, and index lookups. It should not depend directly on a particular indexing technology; the index adapter should be replaceable.
+Owns explicit validated domain commands rather than exposing a generic database mutation endpoint. Initial commands include:
 
-### 4.6 Integration adapter layer
+- `create_variant`;
+- `update_edit_recipe`;
+- `delete_variant`;
+- `create_collection` and `update_collection`;
+- `move_to_trash` and `restore_from_trash`;
+- `clear_trash`;
+- `record_view_event`.
+
+Commands should be transactional, auditable where appropriate, and emit domain events for dependent jobs.
+
+### 4.6 Variant and rendering service
+
+Stores ordered edit operations as a versioned canonical edit recipe. A browser renderer may provide an interactive approximation, but the backend renderer is authoritative for full-resolution export. Both consume the same recipe definitions. Rendered previews are cached using a key derived from source fingerprint, variant recipe, renderer version, and requested size/format.
+
+### 4.7 Search/query service
+
+Translates user queries into catalog filters, feature comparisons, and semantic-index lookups. It should not depend directly on a particular indexing technology; the index adapter should be replaceable.
+
+### 4.8 Integration adapter layer
 
 External applications are accessed through adapters with a common handoff interface. The first adapter targets Home Companion. Adapters receive stable asset/variant IDs and can request rendered files and metadata from the backend.
 
-### 4.7 Visitor telemetry service
+### 4.9 Visitor telemetry service
 
 Visitor-mode interaction logging is a first-class backend capability, not incidental frontend analytics. It provides the source data for view statistics, hidden-gem ranking, and recommendations.
 
 The frontend should emit semantic events rather than incrementing counters directly. The backend validates, timestamps, persists, deduplicates, and aggregates those events.
+
+### 4.10 File-management service
+
+Owns soft-trash, restore, source-file moves, and permanent deletion. Soft-trash changes catalog state only; it does not move the original file. It must use explicit commands and preserve enough state to explain or recover an operation. It must not silently delete files because an analysis or recommendation pipeline marked them as low quality.
 
 ## 5. Persistence model
 
@@ -106,7 +156,7 @@ The initial implementation should use a local metadata database plus filesystem/
 
 Suggested entities:
 
-- `Asset`: stable ID, source path, content fingerprint, dimensions, format, timestamps, and source status.
+- `Asset`: stable content-oriented ID, current source path(s), content fingerprint, dimensions, format, timestamps, and source status.
 - `Variant`: stable ID, asset ID, name, edit recipe, and renderer version.
 - `EditOperation`: variant ID, order, operation type, and parameters.
 - `AnalysisRun`: run ID, scope, analyzer/model versions, status, and timestamps.
@@ -116,12 +166,14 @@ Suggested entities:
 - `IndexRun`: run ID, source data versions, status, and timestamps.
 - `Collection`: user-created grouping and membership.
 - `TrashEntry`: asset/variant/export reference, original location, deletion state, and timestamps.
-- `ViewEvent` or aggregated `ViewStats`: asset/variant ID, event type, count, and last-seen time.
+- `ViewStats`: derived aggregates by asset/variant, event type, count, exposure, and last-seen time.
 - `VisitorSession`: session ID, start/end timestamps, mode, client metadata, and schema version.
 - `ViewEvent`: event ID, session ID, asset/variant ID, event type, client timestamp, server timestamp, duration where applicable, source context, and deduplication key.
 - `Job`: common job ID, type, state, progress, configuration, error, and retry information.
 
 Derived records must reference the versions used to produce them. Source assets and user-created edit metadata should survive rebuilds of analysis, clustering, and search indexes.
+
+Raw visitor events are retained independently from `ViewStats`. Statistics and rankings must be rebuildable from the raw event history.
 
 ## 6. Visitor-mode telemetry design
 
@@ -178,6 +230,8 @@ queued → running → completed
 ```
 
 Each job should have a scope, configuration, dependency list, progress counters, logs/error details, and an idempotency key. Work should be split into asset-level units where possible so interrupted jobs can resume without repeating completed work.
+
+The job manager is part of the backend modular monolith. Worker processes are an execution detail, not independent services with their own domain ownership. Workers may read source files and write only through defined result repositories or job outputs; they must not mutate user-owned metadata directly.
 
 ### 7.2 Image analysis pipeline
 

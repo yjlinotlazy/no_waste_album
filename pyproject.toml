@@ -1,0 +1,9 @@
+[tool.coverage.run]
+source = ["backend"]
+branch = true
+omit = ["backend/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 80

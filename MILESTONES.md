@@ -1,119 +1,92 @@
 # Implementation Milestones
 
-The immediate priority is to validate the local web-app architecture and the non-destructive editing layer before building analysis, clustering, ranking, or advanced library management.
+The immediate objective is to establish a trustworthy local application foundation, a fast library catalog, and a usable non-destructive editing layer. We will hold a checkpoint after these three milestones before committing to advanced functionality.
 
-## Milestone 0 — Browse a local image library
+## Active milestones
 
-### Goal
+### Milestone 0 — Production foundation
 
-Build the basic local backend and dedicated web frontend needed to browse images from a configured folder, including nested subfolders.
+Build the modular local monolith and its development boundaries:
 
-### Scope
+- local backend and dedicated frontend;
+- documented API boundary;
+- configuration and local runtime setup;
+- SQLite schema and migrations;
+- `牛马模式` / `游客模式` enforcement;
+- structured application logging;
+- common job abstraction;
+- basic automated test setup.
 
-#### Backend
+Exit condition: the app starts cleanly, serves the frontend, and has stable API and domain boundaries.
 
-- Start a local web server and serve the frontend.
-- Accept a configured library root folder.
-- Recursively discover supported image files in subfolders.
-- Return folder and image data through a documented API.
-- Expose stable image identifiers or stable source references.
-- Serve thumbnails and full-image previews safely.
-- Return basic metadata: filename, relative path, dimensions, format, and timestamps where available.
-- Detect and report unsupported, unreadable, or missing files without stopping the whole scan.
+### Milestone 1 — Library catalog
 
-#### Frontend
+Build a fast, reliable inventory of the local photo library:
 
-- Show the folder hierarchy.
-- Show images for the selected folder.
-- Provide thumbnail and larger-preview views.
-- Support basic navigation between images.
-- Display the image path and basic metadata.
-- Clearly display the active `牛马模式` or `游客模式`.
-- Implement 游客模式 as browse-only, even if most management functionality is not yet available.
+- recursive folder discovery;
+- content-based asset identity;
+- cached catalog;
+- incremental rescanning;
+- foldable parent-child folder explorer;
+- paginated browsing;
+- thumbnails and previews;
+- missing, moved, and changed-file detection.
 
-### Acceptance criteria
+Exit condition: browsing remains fast with a genuinely large photo library and does not send the entire library to the browser.
 
-- The app can be started locally and opened in a browser.
-- A configured folder with multiple levels of subfolders is browsable.
-- Images remain in their original locations and are not modified.
-- Selecting a folder loads its images without requiring a full page reload.
-- A user can open a full-size preview and return to the folder view.
-- Unreadable files are reported clearly and do not crash the server or UI.
-- Frontend and backend communicate through an explicit API boundary.
+### Milestone 2 — Editing and rendering
 
-### Out of scope
+Prove the core product interaction with a canonical, non-destructive editing model:
 
-- Image editing.
-- Image analysis, ML clustering, and search indexing.
-- Duplicate and low-quality detection.
-- Trash and permanent deletion.
-- External-app handoff.
-- Cloud sync, authentication, and multi-user support.
+- versioned edit-recipe schema;
+- crop;
+- color adjustments;
+- white balance and Auto WB;
+- filters;
+- browser-side responsive preview renderer;
+- backend authoritative full-resolution renderer;
+- multiple UUID-backed variants;
+- preview caching;
+- export with provenance;
+- undo/redo.
 
-## Milestone 1 — Non-destructive photo editing
+Exit condition: browser preview and exported image are acceptably consistent, variants can be saved and loaded, and the original image remains untouched.
 
-### Goal
+## Checkpoint after Milestone 2
 
-Enable a user to edit a viewed photo in the browser while storing all edits as metadata and rendering the result responsively.
+Before starting advanced functionality, review:
 
-### Scope
+- whether the local architecture is stable;
+- whether catalog browsing is fast enough at realistic library size;
+- whether the editing experience feels useful;
+- whether browser and backend rendering are sufficiently consistent;
+- whether the recipe and asset models are ready to support future pipelines;
+- which technical choices need to change before production implementation continues.
 
-#### Editing model
+The checkpoint is a deliberate decision point, not merely a progress review.
 
-- Define a versioned edit-recipe schema.
-- Support crop, color adjustments including white balance, and at least one filter.
-- Store edit recipes separately from the original image file.
-- Allow multiple variants for one source image.
-- Provide variant creation, naming, saving, editing, and deletion.
-- Support undo/redo during an editing session.
+## Deferred advanced functionality
 
-#### Preview rendering
+| Area | Planned capability | Depends on | Priority after checkpoint |
+|---|---|---|---|
+| Visitor telemetry | Sessions, semantic events, qualified views, deduplication, durable raw event log, derived view statistics | Foundation, catalog | Highest |
+| Image analysis | Quality scoring, colors, objects, embeddings, structural features, versioned analysis runs | Catalog, job system | Highest |
+| Search | Metadata, color, object, visual-similarity, and structural search; incremental semantic index | Image analysis | High |
+| ML clustering | Feature generation, vector models, versioned clustering runs, reviewable cluster suggestions | Image analysis, job system | High |
+| Recommendations | Hidden-gem ranking, view-stat weighting, explainable recommendation results | Telemetry, search, clustering | High |
+| Duplicate detection | Exact fingerprints, timestamp-assisted near-duplicates, visual comparison | Catalog, image analysis | Medium |
+| Quality cleanup | Low-quality review, bulk selection, explainable scores | Image analysis, file management | Medium |
+| File management | Trash, restore, explicit Clear Trash, audited permanent deletion | Catalog, domain service | Medium |
+| Collections | Manual collections, accepted cluster organization, collection search | Catalog, domain service | Medium |
+| External integrations | Generic shuttle/adapter layer, Home Companion integration | Stable asset/variant model | Medium |
+| Advanced editing | RAW development, layered editing, masks, brushes, batch editing, stronger color management | Editing foundation | Later |
+| Automation | Filesystem watchers, scheduled analysis, automatic stale-data refresh | Job system, catalog | Later |
+| Portability | Metadata backup, portable edit recipes, derived-data rebuild tooling | Stable persistence model | Later |
 
-- Render edits in the browser using a reduced-resolution working preview.
-- Update the preview interactively as controls change.
-- Keep the UI responsive while rendering.
-- Cache previews where useful.
-- Show a clear loading state when a preview is not immediately available.
+## Delivery principles
 
-#### Full-resolution output
-
-- Provide an explicit export action that renders the selected recipe at full resolution.
-- Export to a new file without changing the original.
-- Preserve provenance linking the export to its source asset and variant.
-- Ensure the backend can reproduce the saved recipe independently of the browser session.
-
-### Acceptance criteria
-
-- A user can crop an image, adjust color, apply a filter, and see the result in the browser.
-- Slider and control changes update the preview without a full page reload.
-- Saving a variant changes metadata only; the original file remains byte-for-byte unchanged.
-- Multiple variants of the same photo can be saved and viewed independently.
-- Reloading the page restores saved variants and their edits.
-- Export produces a new rendered image and leaves the source untouched.
-- The saved recipe contains sufficient information to reproduce the variant.
-- 游客模式 can view saved variants but cannot edit, save, export, or delete them.
-- 牛马模式 can perform the supported editing actions.
-
-### Suggested technical validation
-
-Before expanding the editor, prove these risks with a small vertical slice:
-
-1. Load one large JPEG from the backend.
-2. Generate a browser preview.
-3. Apply crop, color adjustment, and one filter from a JSON recipe.
-4. Save and reload the recipe.
-5. Export a full-resolution result through the backend.
-6. Compare the browser preview and backend export for acceptable visual consistency.
-
-### Out of scope
-
-- RAW development.
-- Layered editing, masks, brushes, or selections.
-- AI retouching or generative editing.
-- Batch editing.
-- Complex color-management guarantees.
-- Image analysis and ML pipelines, except where needed to support the editor.
-
-## After Milestone 1
-
-Once browsing and editing are proven, the next milestones can add the on-demand image-analysis, clustering, indexing, cleanup, recommendation, and Home Companion integration pipelines described in `REQUIREMENTS.md` and `DESIGN.md`.
+- Every milestone should leave the application runnable.
+- Prefer vertical slices over long infrastructure-only phases.
+- Keep the backend as a modular monolith; use worker processes only for expensive jobs.
+- Preserve original files and user-created metadata across all future iterations.
+- Version all derived data, models, indexes, and renderers.
