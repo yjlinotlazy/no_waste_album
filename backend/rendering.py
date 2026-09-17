@@ -24,6 +24,8 @@ class Renderer:
         width, height = image.size
         box = (round(crop["x"] * width), round(crop["y"] * height), round((crop["x"] + crop["width"]) * width), round((crop["y"] + crop["height"]) * height))
         image = image.crop(box)
+        if recipe["rotate"]:
+            image = image.rotate(recipe["rotate"], expand=True)
         adjustments = recipe["adjustments"]
         image = ImageEnhance.Brightness(image).enhance(1 + adjustments["brightness"])
         image = ImageEnhance.Contrast(image).enhance(1 + adjustments["contrast"])
@@ -78,9 +80,7 @@ class Renderer:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if selected_filter == "kindle_16gray":
             fitted = ImageOps.contain(image, (600, 800), method=Image.Resampling.LANCZOS)
-            kindle_image = Image.new("L", (600, 800), 255)
-            kindle_image.paste(fitted, ((600 - fitted.width) // 2, (800 - fitted.height) // 2))
-            image = kindle_image.point(lambda value: round(value / 17) * 17)
+            image = fitted.point(lambda value: round(value / 17) * 17)
             image.save(destination, format="PNG", optimize=True)
         elif destination.suffix.casefold() == ".png":
             image.save(destination, format="PNG", optimize=True)

@@ -7,7 +7,7 @@ FILTERS = {"none", "warm", "mono", "fade", "matte", "vintage", "cinematic", "por
 
 
 def default_recipe() -> dict:
-    return {"schema_version": RECIPE_VERSION, "crop": {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}, "adjustments": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "temperature": 0.0}, "filter": "none"}
+    return {"schema_version": RECIPE_VERSION, "crop": {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}, "adjustments": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "temperature": 0.0}, "filter": "none", "rotate": 0}
 
 
 def _number(value, fallback=0.0):
@@ -35,4 +35,5 @@ def normalize(recipe: dict) -> dict:
     if selected_filter not in FILTERS:
         raise ValueError(f"unsupported filter: {selected_filter}")
     base["filter"] = selected_filter
+    base["rotate"] = round(_clamp(recipe.get("rotate"), -180, 180), 2)
     return deepcopy(base)

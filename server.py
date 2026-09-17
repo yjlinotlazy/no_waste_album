@@ -25,6 +25,7 @@ from backend.rendering import Renderer
 from backend.jobs import JobStore
 from backend.worker import Worker
 from backend.recipes import normalize
+from server_logging import CountingWriter, RequestLogger
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".heic", ".heif"}
@@ -228,6 +229,35 @@ class Handler(BaseHTTPRequestHandler):
     config_path = None
     config = None
     web_root = Path(__file__).parent / "web"
+    request_logger = RequestLogger(Path(__file__).parent)
+    _telemetry_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+    def handle_one_request(self):
+        started_at = time.time()
+        original_wfile = self.wfile
+        counted_wfile = CountingWriter(original_wfile)
+        self.wfile = counted_wfile
+        self._telemetry_status = HTTPStatus.INTERNAL_SERVER_ERROR
+        try:
+            super().handle_one_request()
+        finally:
+            self.wfile = original_wfile
+            try:
+                request_size = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                request_size = 0
+            self.request_logger.record(
+                target=getattr(self, "path", ""),
+                method=getattr(self, "command", "UNKNOWN"),
+                status=getattr(self, "_telemetry_status", HTTPStatus.INTERNAL_SERVER_ERROR),
+                request_size=request_size,
+                response_size=counted_wfile.bytes_written,
+                started_at=started_at,
+            )
+
+    def send_response(self, code, message=None):
+        self._telemetry_status = int(code)
+        super().send_response(code, message)
 
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
@@ -376,6 +406,17 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError) as error:
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"tag": "bad_quality", "threshold": threshold, "applied": applied})
+        tag_match = re.match(r"^/api/assets/([^/]+)/tags$", parsed.path)
+        if tag_match:
+            if not self.operator_only(): return
+            asset_id = tag_match.group(1)
+            if not self.library.asset_by_id(asset_id):
+                return self.send_json({"error": "Asset not found"}, HTTPStatus.NOT_FOUND)
+            tag = str(self.body_json().get("tag", "")).strip()
+            if not tag or len(tag) > 80:
+                return self.send_json({"error": "tag must be 1-80 characters"}, HTTPStatus.BAD_REQUEST)
+            self.library.catalog.set_tag(asset_id, tag, "manual")
+            return self.send_json({"asset_id": asset_id, "tags": self.library.catalog.tags_for_asset(asset_id)}, HTTPStatus.CREATED)
         if parsed.path == "/api/jobs":
             if not self.operator_only(): return
             payload = self.body_json()
@@ -461,6 +502,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/trash":
             if not self.operator_only(): return
             return self.send_json(self.library.catalog.clear_trash())
+        tag_match = re.match(r"^/api/assets/([^/]+)/tags/(.+)$", parsed.path)
+        if tag_match:
+            if not self.operator_only(): return
+            asset_id, tag = tag_match.groups()
+            if not self.library.asset_by_id(asset_id):
+                return self.send_json({"error": "Asset not found"}, HTTPStatus.NOT_FOUND)
+            self.library.catalog.remove_tag(asset_id, unquote(tag), "manual")
+            return self.send_json({"asset_id": asset_id, "tags": self.library.catalog.tags_for_asset(asset_id)})
         match = re.match(r"^/api/recipes/([^/]+)/([^/]+)$", parsed.path)
         if not match:
             return self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)

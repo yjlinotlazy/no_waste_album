@@ -37,7 +37,7 @@ class RenderingTests(unittest.TestCase):
             with Image.open(destination) as edited:
                 self.assertEqual(edited.format, "PNG")
                 self.assertEqual(edited.mode, "L")
-                self.assertEqual(edited.size, (600, 800))
+                self.assertEqual(edited.size, (600, 300))
                 values = set(edited.getdata())
                 self.assertLessEqual(len(values), 16)
                 self.assertTrue(all(value % 17 == 0 for value in values))

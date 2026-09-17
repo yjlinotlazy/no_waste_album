@@ -9,6 +9,7 @@ class RecipeTests(unittest.TestCase):
         self.assertAlmostEqual(recipe["crop"]["x"], .2)
         self.assertEqual(recipe["crop"]["y"], 0)
         self.assertAlmostEqual(recipe["adjustments"]["temperature"], .5)
+        self.assertEqual(normalize({"rotate": 90})["rotate"], 90)
         self.assertEqual(recipe["schema_version"], 1)
 
     def test_unknown_filter_is_rejected(self):
