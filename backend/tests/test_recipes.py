@@ -17,7 +17,7 @@ class RecipeTests(unittest.TestCase):
             normalize({"filter": "invalid"})
 
     def test_portrait_filters_are_supported(self):
-        for selected in ("portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "kindle_16gray"):
+        for selected in ("portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "kindle_16gray", "shadow_recovery", "night_lift", "backlight", "highlight_recovery", "local_clahe", "auto_develop"):
             self.assertEqual(normalize({"filter": selected})["filter"], selected)
 
 

@@ -2,7 +2,13 @@
 
 ## POC
 
-This dependency-free POC serves a local image library with nested folders and demonstrates non-destructive photo editing in the browser.
+This local app serves a local image library with nested folders and demonstrates non-destructive photo editing in the browser.
+
+Install runtime dependencies once with:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 Configure the app in `~/.config/no_waste_album/config.yaml`, then run:
 

@@ -292,11 +292,14 @@ class Handler(BaseHTTPRequestHandler):
             job = self.library.jobs.get(result_match.group(1))
             if not job:
                 return self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
-            if job["type"] != "quality_detection":
+            if job["type"] not in {"quality_detection", "auto_develop"}:
                 return self.send_json({"error": "This job has no image results"}, HTTPStatus.BAD_REQUEST)
             query = parse_qs(parsed.query)
             page = max(1, int(query.get("page", ["1"])[0]))
             page_size = max(1, min(100, int(query.get("page_size", ["50"])[0])))
+            if job["type"] == "auto_develop":
+                results, total = self.library.catalog.auto_variants(job["scope"].get("folder", ""), job["id"], page, page_size)
+                return self.send_json({"results": results, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
             bad_only = query.get("bad_only", ["false"])[0].lower() == "true"
             threshold_value = query.get("threshold", [""])[0]
             threshold = float(threshold_value) if threshold_value else None
@@ -310,6 +313,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"root": str(self.library.root), "folders": self.library.folders()})
         if parsed.path == "/api/tags":
             return self.send_json({"tags": self.library.catalog.tags()})
+        asset_match = re.match(r"^/api/assets/([^/]+)$", parsed.path)
+        if asset_match:
+            asset = self.library.asset_by_id(asset_match.group(1))
+            return self.send_json(asset or {"error": "Asset not found"}, HTTPStatus.OK if asset else HTTPStatus.NOT_FOUND)
         if parsed.path == "/api/trash":
             if self.headers.get(MODE_HEADER, "visitor") != "operator": return self.send_json({"error": "Trash requires 牛马模式."}, HTTPStatus.FORBIDDEN)
             query = parse_qs(parsed.query)
@@ -406,6 +413,14 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError) as error:
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"tag": "bad_quality", "threshold": threshold, "applied": applied})
+        delete_auto_match = re.match(r"^/api/jobs/([^/]+)/delete-auto-variants$", parsed.path)
+        if delete_auto_match:
+            if not self.operator_only(): return
+            job = self.library.jobs.get(delete_auto_match.group(1))
+            if not job or job["type"] != "auto_develop":
+                return self.send_json({"error": "Auto Develop job not found"}, HTTPStatus.NOT_FOUND)
+            deleted = self.library.catalog.delete_auto_variants(job["scope"].get("folder", ""), job["id"])
+            return self.send_json({"deleted": deleted})
         tag_match = re.match(r"^/api/assets/([^/]+)/tags$", parsed.path)
         if tag_match:
             if not self.operator_only(): return
@@ -458,6 +473,16 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as error:
                     return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return self.send_json(recipe, HTTPStatus.CREATED)
+        rename_match = re.match(r"^/api/recipes/([^/]+)/([^/]+)/name$", parsed.path)
+        if rename_match:
+            asset_id, variant_id = rename_match.groups()
+            payload = self.body_json()
+            with self.library.lock:
+                try:
+                    recipe = self.library.metadata.rename_variant(asset_id, variant_id, payload.get("name", ""))
+                except (KeyError, ValueError) as error:
+                    return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(recipe)
         if parsed.path == "/api/export":
             if not self.operator_only(): return
             payload = self.body_json()

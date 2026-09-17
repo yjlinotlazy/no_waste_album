@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 RECIPE_VERSION = 1
-FILTERS = {"none", "warm", "mono", "fade", "matte", "vintage", "cinematic", "portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "kindle_16gray"}
+FILTERS = {"none", "warm", "mono", "fade", "matte", "vintage", "cinematic", "portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "kindle_16gray", "shadow_recovery", "night_lift", "backlight", "highlight_recovery", "local_clahe", "auto_develop"}
 
 
 def default_recipe() -> dict:
@@ -36,4 +36,10 @@ def normalize(recipe: dict) -> dict:
         raise ValueError(f"unsupported filter: {selected_filter}")
     base["filter"] = selected_filter
     base["rotate"] = round(_clamp(recipe.get("rotate"), -180, 180), 2)
+    name = str(recipe.get("name", "")).strip()
+    if name:
+        base["name"] = name[:80]
+    for key in ("exposure", "shadows", "highlights", "local_contrast", "analysis", "source_job_id"):
+        if key in recipe:
+            base[key] = recipe[key]
     return deepcopy(base)

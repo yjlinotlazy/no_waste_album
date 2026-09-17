@@ -292,6 +292,29 @@ class Catalog:
             rows = db.execute("SELECT id, recipe_json FROM variants WHERE asset_id=? ORDER BY created_at, rowid", (asset_id,)).fetchall()
         return [dict(json.loads(row[1]), id=row[0]) for row in rows]
 
+    def auto_variants(self, folder: str, job_id: str, page: int = 1, page_size: int = 50) -> tuple[list[dict], int]:
+        assets = self.assets_in_scope(folder)
+        matches = []
+        for asset in assets:
+            for variant in self.variants(asset.id):
+                if variant.get("source_job_id") == job_id:
+                    matches.append({"id": asset.id, "name": asset.name, "folder": asset.folder, "url": "/media/" + asset.relative_path, "variant_id": variant["id"], "variant_name": variant.get("name", ""), "recipe": variant})
+        total = len(matches)
+        start = max(0, page - 1) * page_size
+        return matches[start:start + page_size], total
+
+    def delete_auto_variants(self, folder: str, job_id: str) -> int:
+        assets = self.assets_in_scope(folder)
+        deleted = 0
+        with closing(self._connect()) as db, db:
+            for asset in assets:
+                rows = db.execute("SELECT id, recipe_json FROM variants WHERE asset_id=?", (asset.id,)).fetchall()
+                for variant_id, recipe_json in rows:
+                    if json.loads(recipe_json).get("source_job_id") == job_id:
+                        db.execute("DELETE FROM variants WHERE asset_id=? AND id=?", (asset.id, variant_id))
+                        deleted += 1
+        return deleted
+
     def asset_id_by_legacy_prefix(self, prefix: str) -> str | None:
         with closing(self._connect()) as db:
             row = db.execute("SELECT id FROM catalog_assets WHERE id LIKE ? LIMIT 1", (f"{prefix}%",)).fetchone()
@@ -301,6 +324,19 @@ class Catalog:
         with closing(self._connect()) as db, db:
             db.execute("INSERT INTO variants(id,asset_id,recipe_json) VALUES (?,?,?)", (variant["id"], asset_id, json.dumps(variant)))
         return variant
+
+    def rename_variant(self, asset_id: str, variant_id: str, name: str) -> dict | None:
+        with closing(self._connect()) as db, db:
+            row = db.execute("SELECT recipe_json FROM variants WHERE asset_id=? AND id=?", (asset_id, variant_id)).fetchone()
+            if not row:
+                return None
+            recipe = json.loads(row[0])
+            if name:
+                recipe["name"] = name
+            else:
+                recipe.pop("name", None)
+            db.execute("UPDATE variants SET recipe_json=? WHERE asset_id=? AND id=?", (json.dumps(recipe), asset_id, variant_id))
+            return dict(recipe, id=variant_id)
 
     def delete_variant(self, asset_id: str, variant_id: str) -> bool:
         with closing(self._connect()) as db, db:

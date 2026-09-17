@@ -63,6 +63,27 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(bad_total, 1)
             self.assertEqual(bad_assets[0].name, "bad.jpg")
 
+    def test_worker_creates_auto_variants_for_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "album").mkdir()
+            Image.new("RGB", (80, 60), (35, 42, 50)).save(root / "album" / "photo.jpg")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            jobs = JobStore(root / "jobs.sqlite")
+            job = jobs.create("auto_develop", {"folder": "album"})
+
+            result = Worker(jobs, catalog).run_once()
+
+            self.assertEqual(result["state"], "completed")
+            self.assertEqual(result["result"]["variants_created"], 1)
+            asset = catalog.assets_in_scope("album")[0]
+            variants = catalog.variants(asset.id)
+            self.assertEqual(variants[0]["name"], "auto")
+            self.assertEqual(variants[0]["source_job_id"], job["id"])
+            self.assertEqual(catalog.delete_auto_variants("album", job["id"]), 1)
+            self.assertEqual(catalog.variants(asset.id), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,12 +2,14 @@
 
 import argparse
 import time
+import uuid
 
 from .catalog import Catalog
 from .config import load
 from .jobs import JobStore
 from .analysis import FeatureStore, analyze
 from .quality import DEFAULT_THRESHOLD, QualityStore, assess
+from .autodevelop import estimate
 
 
 class Worker:
@@ -54,6 +56,26 @@ class Worker:
                         errors += 1
                     self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "bad_images": bad, "errors": errors})
                 result = {"folder": folder, "analyzed": total - errors, "bad_images": bad, "errors": errors}
+            elif job["type"] == "auto_develop":
+                folder = job["scope"].get("folder", "")
+                assets = self.catalog.assets_in_scope(folder)
+                total = len(assets)
+                created = 0
+                errors = 0
+                self.jobs.update_progress(job["id"], 0, {"folder": folder, "images_scanned": 0, "images_total": total, "variants_created": 0, "errors": 0})
+                for index, asset in enumerate(assets, 1):
+                    current = self.jobs.get(job["id"])
+                    if current["state"] == "cancelled":
+                        return current
+                    try:
+                        recipe = estimate(self.catalog.root / asset.relative_path)
+                        recipe.update({"filter": "auto_develop", "name": "auto", "source_job_id": job["id"], "adjustments": {"brightness": 0, "contrast": 0, "saturation": 0, "temperature": recipe["temperature"]}})
+                        self.catalog.add_variant(asset.id, {"id": uuid.uuid4().hex, **recipe})
+                        created += 1
+                    except Exception:
+                        errors += 1
+                    self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "variants_created": created, "errors": errors})
+                result = {"folder": folder, "analyzed": total - errors, "variants_created": created, "errors": errors}
             elif job["type"] == "catalog_scan":
                 result = self.catalog.scan(job["scope"].get("kind", "incremental"), lambda detail: self.jobs.update_progress(job["id"], detail["percent"], detail))
             else:

@@ -42,6 +42,25 @@ class RenderingTests(unittest.TestCase):
                 self.assertLessEqual(len(values), 16)
                 self.assertTrue(all(value % 17 == 0 for value in values))
 
+    def test_shadow_recovery_changes_dark_tones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Image.new("RGB", (2, 1), (24, 30, 36)).save(root / "photo.jpg")
+            destination = root / "shadow.jpg"
+            Renderer(root).render("photo.jpg", {"filter": "shadow_recovery"}, destination)
+            with Image.open(destination) as edited:
+                self.assertGreater(sum(edited.getpixel((0, 0))), 24 + 30 + 36)
+
+    def test_local_clahe_writes_an_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Image.new("RGB", (32, 24), (35, 40, 45)).save(root / "photo.jpg")
+            destination = root / "clahe.jpg"
+            Renderer(root).render("photo.jpg", {"filter": "local_clahe"}, destination)
+            with Image.open(destination) as edited:
+                self.assertEqual(edited.size, (32, 24))
+                self.assertEqual(edited.mode, "RGB")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,9 +2,59 @@
 
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
 
 from .recipes import normalize
+
+
+def _tone_map(image, shadows: float, highlights: float, gamma: float) -> Image.Image:
+    pixels = image.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            red, green, blue = pixels[x, y]
+            luminance = (red + green + blue) / 765
+            shadow_weight = (1 - luminance) ** 2
+            highlight_weight = luminance ** 2
+            values = []
+            for value in (red, green, blue):
+                lifted = ((value / 255) ** gamma) * 255
+                adjusted = value + (lifted - value) * shadows * shadow_weight
+                adjusted *= 1 - highlights * highlight_weight
+                values.append(max(0, min(255, round(adjusted))))
+            pixels[x, y] = tuple(values)
+    return image
+
+
+def _clahe_luminance(image: Image.Image) -> Image.Image:
+    """Apply OpenCV's contrast-limited adaptive histogram equalization to L."""
+    rgb = np.asarray(image, dtype=np.uint8)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    return Image.fromarray(enhanced, mode="RGB")
+
+
+def _auto_develop(image: Image.Image, recipe: dict) -> Image.Image:
+    rgb = np.asarray(image, dtype=np.float32) / 255.0
+    exposure = float(recipe.get("exposure", 0))
+    rgb *= 2 ** exposure
+    temperature = float(recipe.get("adjustments", {}).get("temperature", 0))
+    rgb[:, :, 0] *= 1 + max(0, temperature) * 0.35
+    rgb[:, :, 2] *= 1 + max(0, -temperature) * 0.35
+    luminance = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    shadows = float(recipe.get("shadows", 0))
+    highlights = float(recipe.get("highlights", 0))
+    shadow_weight = (1 - np.clip(luminance, 0, 1)) ** 2
+    highlight_weight = np.clip(luminance, 0, 1) ** 2
+    rgb += (np.power(np.clip(rgb, 0, 1), 0.78) - rgb) * shadows * shadow_weight[:, :, None]
+    rgb *= 1 - highlights * highlight_weight[:, :, None]
+    result = Image.fromarray(np.uint8(np.clip(rgb, 0, 1) * 255), mode="RGB")
+    if recipe.get("local_contrast"):
+        result = _clahe_luminance(result)
+    return result
 
 
 class Renderer:
@@ -72,6 +122,19 @@ class Renderer:
             image = Image.blend(image, Image.new("RGB", image.size, (75, 105, 155)), 0.04)
         elif selected_filter == "kindle_16gray":
             image = image.convert("L")
+        elif selected_filter == "shadow_recovery":
+            image = _tone_map(image, 0.62, 0.12, 0.78)
+        elif selected_filter == "night_lift":
+            image = _tone_map(image, 0.78, 0.22, 0.70)
+            image = ImageEnhance.Color(image).enhance(0.90)
+        elif selected_filter == "backlight":
+            image = _tone_map(image, 0.68, 0.32, 0.76)
+        elif selected_filter == "highlight_recovery":
+            image = _tone_map(image, 0.22, 0.62, 0.92)
+        elif selected_filter == "local_clahe":
+            image = _clahe_luminance(image)
+        elif selected_filter == "auto_develop":
+            image = _auto_develop(image, recipe)
         if selected_filter in {"mono", "portrait_mono"}:
             image = image.convert("L").convert("RGB")
         elif selected_filter == "warm":
