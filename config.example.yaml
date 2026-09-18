@@ -1,8 +1,12 @@
 # No Waste Album local POC configuration
 library: /path/to/your/photos
 data_dir: /path/to/your/photos/no_waste_album
+ml_data_dir: /path/to/your/photos/no_waste_album/ML
+ml_negative_samples_dir: /path/to/your/photos/no_waste_album/ML/negative_samples
 host: 127.0.0.1
 port: 7008
+stack_max_gap_minutes: 15
+stack_phash_max_distance: 8
 page_size: 5
 dev_reload: true
 kindle_gen7_output: /path/to/your/kindle_gen7_output

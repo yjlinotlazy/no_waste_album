@@ -3,12 +3,12 @@
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def estimate(path: Path) -> dict:
     with Image.open(path) as source:
-        image = source.convert("RGB")
+        image = ImageOps.exif_transpose(source).convert("RGB")
         image.thumbnail((512, 512), Image.Resampling.BILINEAR)
         pixels = np.asarray(image, dtype=np.float32) / 255.0
     luminance = pixels @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)

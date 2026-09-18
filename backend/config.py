@@ -8,6 +8,8 @@ from pathlib import Path
 class Config:
     library: Path
     data_dir: Path
+    ml_data_dir: Path
+    ml_negative_samples_dir: Path
     host: str = "127.0.0.1"
     port: int = 7008
 
@@ -23,4 +25,7 @@ def load(path: Path | None = None) -> Config:
     if not values.get("library"):
         raise ValueError(f"library is required in {path}")
     library = Path(values["library"]).expanduser()
-    return Config(library, Path(values.get("data_dir", str(library / "no_waste_album"))).expanduser(), values.get("host", "127.0.0.1"), int(values.get("port", "7008")))
+    data_dir = Path(values.get("data_dir", str(library / "no_waste_album"))).expanduser()
+    ml_data_dir = Path(values.get("ml_data_dir", str(data_dir / "ML"))).expanduser()
+    negative_dir = Path(values.get("ml_negative_samples_dir", str(ml_data_dir / "negative_samples"))).expanduser()
+    return Config(library, data_dir, ml_data_dir, negative_dir, values.get("host", "127.0.0.1"), int(values.get("port", "7008")))

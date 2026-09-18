@@ -6,6 +6,7 @@ import hashlib
 import os
 import sqlite3
 import json
+import uuid
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,42 @@ class Catalog:
                     FOREIGN KEY(tag_name) REFERENCES tags(name) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_name);
+                CREATE TABLE IF NOT EXISTS stack_generations (
+                    id TEXT PRIMARY KEY,
+                    scope_json TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS stacks (
+                    id TEXT PRIMARY KEY,
+                    generation_id TEXT NOT NULL,
+                    folder TEXT NOT NULL,
+                    representative_asset_id TEXT NOT NULL,
+                    locked INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(generation_id) REFERENCES stack_generations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(representative_asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_stacks_generation ON stacks(generation_id);
+                CREATE TABLE IF NOT EXISTS stack_members (
+                    generation_id TEXT NOT NULL,
+                    stack_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    PRIMARY KEY(generation_id, stack_id, asset_id),
+                    FOREIGN KEY(generation_id) REFERENCES stack_generations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(stack_id) REFERENCES stacks(id) ON DELETE CASCADE,
+                    FOREIGN KEY(asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_stack_members_asset ON stack_members(asset_id);
+                CREATE TABLE IF NOT EXISTS stack_phashes (
+                    asset_id TEXT PRIMARY KEY,
+                    content_fingerprint TEXT NOT NULL,
+                    hash_value TEXT NOT NULL,
+                    hash_version TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                );
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(catalog_assets)")}
             if "hidden" not in columns:
@@ -215,16 +252,63 @@ class Catalog:
             row = db.execute("SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE id=?", (asset_id,)).fetchone()
         return CatalogAsset(**dict(row)) if row else None
 
-    def assets_in_scope(self, folder: str) -> list[CatalogAsset]:
+    def assets_in_scope(self, folder: str, include_hidden: bool = False) -> list[CatalogAsset]:
         if folder:
             where = "status='available' AND (folder=? OR folder LIKE ?)"
-            params = (folder, folder.rstrip("/") + "/%")
+            params: tuple = (folder, folder.rstrip("/") + "/%")
         else:
             where = "status='available'"
             params = ()
+        if not include_hidden:
+            where += " AND hidden=0"
         with closing(self._connect()) as db:
             rows = db.execute(f"SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE {where} ORDER BY modified_ns ASC, relative_path COLLATE NOCASE", params).fetchall()
         return [CatalogAsset(**dict(row)) for row in rows]
+
+    def stack_phashes(self, assets, hasher) -> tuple[dict[str, int], int]:
+        hashes: dict[str, int] = {}
+        computed = 0
+        errors = 0
+        with closing(self._connect()) as db, db:
+            for asset in assets:
+                fingerprint = db.execute("SELECT content_fingerprint FROM catalog_assets WHERE id=?", (asset.id,)).fetchone()[0]
+                cached = db.execute("SELECT hash_value,hash_version FROM stack_phashes WHERE asset_id=? AND content_fingerprint=?", (asset.id, fingerprint)).fetchone()
+                if cached and cached[1] == "phash64-v1":
+                    hashes[asset.id] = int(cached[0], 16)
+                    continue
+                try:
+                    value = hasher(self.root / asset.relative_path)
+                except Exception:
+                    errors += 1
+                    continue
+                hashes[asset.id] = value
+                db.execute("INSERT OR REPLACE INTO stack_phashes(asset_id,content_fingerprint,hash_value,hash_version) VALUES (?,?,?,?)", (asset.id, fingerprint, f"{value:016x}", "phash64-v1"))
+                computed += 1
+        return hashes, computed, errors
+
+    def replace_stack_generation(self, scope: str, config: dict, grouped: list[list[CatalogAsset]]) -> dict:
+        generation_id = uuid.uuid4().hex
+        with closing(self._connect()) as db, db:
+            db.execute("UPDATE stack_generations SET state='backup' WHERE state='active'")
+            db.execute("DELETE FROM stack_generations WHERE state='backup' AND id != (SELECT id FROM stack_generations WHERE state='backup' ORDER BY created_at DESC, rowid DESC LIMIT 1)")
+            db.execute("INSERT INTO stack_generations(id,scope_json,config_json,state) VALUES (?,?,?, 'active')", (generation_id, json.dumps({"folder": scope}), json.dumps(config)))
+            for members in grouped:
+                stack_id = members[0].id if len(members) == 1 else uuid.uuid4().hex
+                db.execute("INSERT INTO stacks(id,generation_id,folder,representative_asset_id) VALUES (?,?,?,?)", (stack_id, generation_id, members[0].folder, members[0].id))
+                db.executemany("INSERT INTO stack_members(generation_id,stack_id,asset_id,ordinal) VALUES (?,?,?,?)", ((generation_id, stack_id, asset.id, ordinal) for ordinal, asset in enumerate(members)))
+        return {"generation_id": generation_id, "stacks": len(grouped), "images": sum(len(group) for group in grouped)}
+
+    def stack_results(self, generation_id: str, page: int = 1, page_size: int = 50) -> tuple[list[dict], int]:
+        page = max(1, page)
+        page_size = max(1, min(200, page_size))
+        with closing(self._connect()) as db:
+            total = db.execute("SELECT COUNT(*) FROM stacks s JOIN stack_generations g ON g.id=s.generation_id WHERE s.generation_id=? AND g.state='active'", (generation_id,)).fetchone()[0]
+            rows = db.execute("SELECT s.id,s.folder,s.representative_asset_id,a.name,a.relative_path,COUNT(m.asset_id) FROM stacks s JOIN stack_generations g ON g.id=s.generation_id JOIN catalog_assets a ON a.id=s.representative_asset_id JOIN stack_members m ON m.stack_id=s.id AND m.generation_id=s.generation_id WHERE s.generation_id=? AND g.state='active' GROUP BY s.id ORDER BY s.folder,a.modified_ns LIMIT ? OFFSET ?", (generation_id, page_size, (page - 1) * page_size)).fetchall()
+            results = []
+            for row in rows:
+                members = db.execute("SELECT a.id,a.name,a.relative_path FROM stack_members m JOIN catalog_assets a ON a.id=m.asset_id WHERE m.generation_id=? AND m.stack_id=? ORDER BY m.ordinal", (generation_id, row[0])).fetchall()
+                results.append({"id": row[0], "folder": row[1], "representative_id": row[2], "name": row[3], "relative_path": row[4], "url": "/media/" + row[4], "member_count": row[5], "members": [{"id": member[0], "name": member[1], "relative_path": member[2], "url": "/media/" + member[2]} for member in members]})
+        return results, total
 
     def set_tag(self, asset_id: str, tag_name: str, source: str = "manual") -> None:
         with closing(self._connect()) as db, db:
@@ -335,6 +419,13 @@ class Catalog:
                 recipe["name"] = name
             else:
                 recipe.pop("name", None)
+            db.execute("UPDATE variants SET recipe_json=? WHERE asset_id=? AND id=?", (json.dumps(recipe), asset_id, variant_id))
+            return dict(recipe, id=variant_id)
+
+    def replace_variant(self, asset_id: str, variant_id: str, recipe: dict) -> dict | None:
+        with closing(self._connect()) as db, db:
+            if not db.execute("SELECT 1 FROM variants WHERE asset_id=? AND id=?", (asset_id, variant_id)).fetchone():
+                return None
             db.execute("UPDATE variants SET recipe_json=? WHERE asset_id=? AND id=?", (json.dumps(recipe), asset_id, variant_id))
             return dict(recipe, id=variant_id)
 

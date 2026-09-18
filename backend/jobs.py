@@ -6,7 +6,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "clustering", "indexing", "catalog_scan"}
+JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "stack_generation", "clustering", "indexing", "catalog_scan"}
 TRANSITIONS = {
     "queued": {"running", "cancelled"},
     "running": {"completed", "failed", "cancelled"},

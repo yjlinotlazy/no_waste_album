@@ -28,6 +28,19 @@ class RenderingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Renderer(root).render("raw/photo.jpg", {}, root / "out.jpg")
 
+    def test_render_applies_exif_orientation_before_export(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "oriented.jpg"
+            image = Image.new("RGB", (60, 40), (100, 120, 140))
+            exif = image.getexif()
+            exif[274] = 6
+            image.save(source, exif=exif.tobytes())
+            destination = root / "oriented.png"
+            Renderer(root).render("oriented.jpg", {}, destination)
+            with Image.open(destination) as edited:
+                self.assertEqual(edited.size, (40, 60))
+
     def test_kindle_filter_writes_16_level_grayscale_png(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -182,6 +182,8 @@ def save_config(path, config):
     lines = [
         f"library: {config['library']}",
         f"data_dir: {config.get('data_dir', str(Path(config['library']).expanduser() / 'no_waste_album'))}",
+        f"ml_data_dir: {config.get('ml_data_dir', str(Path(config.get('data_dir', str(Path(config['library']).expanduser() / 'no_waste_album'))).expanduser() / 'ML'))}",
+        f"ml_negative_samples_dir: {config.get('ml_negative_samples_dir', str(Path(config.get('ml_data_dir', str(Path(config['data_dir']).expanduser() / 'ML'))).expanduser() / 'negative_samples'))}",
         f"host: {config.get('host', '127.0.0.1')}",
         f"port: {config.get('port', '7008')}",
         f"page_size: {config.get('page_size', '5')}",
@@ -283,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/settings":
-            return self.send_json({"library": str(self.library.root), "page_size": int(self.config.get("page_size", "5"))})
+            return self.send_json({"library": str(self.library.root), "page_size": int(self.config.get("page_size", "5")), "stack_max_gap_minutes": float(self.config.get("stack_max_gap_minutes", "15")), "stack_phash_max_distance": int(self.config.get("stack_phash_max_distance", "8"))})
         if parsed.path == "/api/jobs":
             if not self.operator_only(): return
             return self.send_json({"jobs": self.library.jobs.list()})
@@ -292,13 +294,21 @@ class Handler(BaseHTTPRequestHandler):
             job = self.library.jobs.get(result_match.group(1))
             if not job:
                 return self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
-            if job["type"] not in {"quality_detection", "auto_develop"}:
+            if job["type"] not in {"quality_detection", "auto_develop", "stack_generation"}:
                 return self.send_json({"error": "This job has no image results"}, HTTPStatus.BAD_REQUEST)
             query = parse_qs(parsed.query)
             page = max(1, int(query.get("page", ["1"])[0]))
             page_size = max(1, min(100, int(query.get("page_size", ["50"])[0])))
             if job["type"] == "auto_develop":
                 results, total = self.library.catalog.auto_variants(job["scope"].get("folder", ""), job["id"], page, page_size)
+                return self.send_json({"results": results, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
+            if job["type"] == "stack_generation":
+                generation_id = job.get("result", {}).get("generation_id") or job["scope"].get("generation_id")
+                if not generation_id:
+                    with self.library.catalog._connect() as db:
+                        row = db.execute("SELECT id FROM stack_generations WHERE state='active' ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
+                    generation_id = row[0] if row else ""
+                results, total = self.library.catalog.stack_results(generation_id, page, page_size)
                 return self.send_json({"results": results, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
             bad_only = query.get("bad_only", ["false"])[0].lower() == "true"
             threshold_value = query.get("threshold", [""])[0]
@@ -436,7 +446,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self.operator_only(): return
             payload = self.body_json()
             try:
-                job = self.library.jobs.create(payload.get("type", ""), payload.get("scope", {}))
+                job_type = payload.get("type", "")
+                scope = dict(payload.get("scope", {}))
+                if job_type == "stack_generation":
+                    scope.setdefault("max_gap_minutes", float(self.config.get("stack_max_gap_minutes", "15")))
+                    scope.setdefault("max_phash_distance", int(self.config.get("stack_phash_max_distance", "8")))
+                job = self.library.jobs.create(job_type, scope)
             except ValueError as error:
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             self.library.start_job(job)
@@ -480,6 +495,15 @@ class Handler(BaseHTTPRequestHandler):
             with self.library.lock:
                 try:
                     recipe = self.library.metadata.rename_variant(asset_id, variant_id, payload.get("name", ""))
+                except (KeyError, ValueError) as error:
+                    return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(recipe)
+        overwrite_match = re.match(r"^/api/recipes/([^/]+)/([^/]+)/overwrite$", parsed.path)
+        if overwrite_match:
+            asset_id, variant_id = overwrite_match.groups()
+            with self.library.lock:
+                try:
+                    recipe = self.library.metadata.replace_variant(asset_id, variant_id, self.body_json().get("recipe", {}))
                 except (KeyError, ValueError) as error:
                     return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return self.send_json(recipe)

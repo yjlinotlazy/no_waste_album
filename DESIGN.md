@@ -50,6 +50,19 @@ The design deliberately separates two different meanings of “indexing”:
 
 The catalog must remain useful even when semantic analysis has never run or is stale.
 
+### 2.3 Catalog as the final validation gate
+
+The catalog is the authoritative source for whether an asset is still active. Derived systems—thumbnails, image features, embeddings, search indexes, clusters, recommendations, and job results—must not independently decide whether an image is currently usable.
+
+Every derived record should retain at least the asset ID and the source fingerprint used to create it. Before a derived result is published or returned to the UI, a cheap validation step must check the current catalog record:
+
+- `available` with a matching source fingerprint: the result is eligible;
+- hidden: the result may remain stored, but normal browse and recommendation queries exclude it;
+- trashed or permanently deleted: the result is not user-visible and is queued for cleanup;
+- missing or fingerprint changed: the result is marked stale and must be regenerated before being treated as current.
+
+This is a validation-and-filtering boundary, not a requirement to synchronously update every index after every mutation. App mutations update the catalog transactionally and enqueue affected derived work. Derived indexes may temporarily be stale, but they must never override the catalog's final active-state decision.
+
 ### 2.2 Library change model
 
 The expected library behavior is mostly append-only: new photos and folders are normally added in chronological order, while older files are rarely modified. The catalog should optimize for this pattern.
@@ -219,6 +232,24 @@ The ranker should consume aggregated statistics rather than raw event counts alo
 
 Every ranking result should retain the statistics snapshot, weighting configuration, and ranker version used to produce it.
 
+### 6.5 Album-display view events — TODO
+
+Manager-mode browsing and enlarged-image editing must not count as album views. A true `view` event will be created only by a future album-display integration when an image is successfully pushed to and presented by a target device. Until that integration exists, the application must not infer view counts from browser requests, enlarged-view opens, thumbnails, or device-export operations. The future event should include the asset/stack/variant identity, target device, delivery/display result, timestamp, and session or presentation-run ID.
+
+The planned device-delivery flow is:
+
+```text
+device GET
+  → choose best eligible stack
+  → choose image within the stack
+  → choose the best matching saved/current variant
+  → apply device-specific processing
+  → return finalized device image
+  → record a view for the stack + source asset
+```
+
+The current manual device-send action is an operator-only shortcut. It may send the live unsaved editor recipe and does not change saved variant metadata, but it still counts as a view of the source asset when delivery succeeds. Future device GET handlers should distinguish actual delivery/display from retries or prefetches so transport behavior does not accidentally create extra views.
+
 ## 7. Processing jobs
 
 ### 7.1 Common job lifecycle
@@ -247,6 +278,10 @@ Steps:
 6. Mark dependent search and clustering data as stale when necessary.
 
 Analysis should be on demand, with optional future support for automatic scheduling after import. Failures for one asset should not fail the entire run.
+
+### 7.2 Personal album-quality model
+
+The personal curation model is a separate on-demand job. Manually tagged `高质量` assets that are not tagged `商业` are positive samples; `商业` assets remain a separate domain and are not treated as negatives. On the model result page, the user can apply `高质量` to additional positives or mark a result as **wrong prediction**, which copies the source image into the configured ML negative-sample directory and records it as a definitive negative sample. These negative-sample copies are deliberate training artifacts and remain after the original catalog asset is deleted. The model job must show sample counts, model version, score breakdowns, and reviewable predictions before applying tags.
 
 ### 7.3 ML clustering pipeline
 

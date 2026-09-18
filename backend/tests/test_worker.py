@@ -84,6 +84,27 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(catalog.delete_auto_variants("album", job["id"]), 1)
             self.assertEqual(catalog.variants(asset.id), [])
 
+    def test_worker_runs_stack_generation_and_caches_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "album").mkdir()
+            for index in range(3):
+                Image.new("RGB", (160, 120), (40 + index, 40, 40)).save(root / "album" / f"2024-01-01 10.0{index}.jpg")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            jobs = JobStore(root / "jobs.sqlite")
+            job = jobs.create("stack_generation", {"folder": "album", "max_gap_minutes": 15, "max_phash_distance": 8})
+
+            result = Worker(jobs, catalog).run_once()
+
+            self.assertEqual(result["state"], "completed")
+            self.assertEqual(result["result"]["images"], 3)
+            self.assertEqual(result["result"]["stacks"], 1)
+            generation = catalog._connect().execute("SELECT id FROM stack_generations WHERE state='active'").fetchone()[0]
+            stacks, total = catalog.stack_results(generation)
+            self.assertEqual(total, 1)
+            self.assertEqual(stacks[0]["member_count"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

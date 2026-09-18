@@ -69,7 +69,7 @@ class Renderer:
             raise FileNotFoundError(relative_path)
         recipe = normalize(recipe)
         with Image.open(source) as original:
-            image = original.convert("RGB")
+            image = ImageOps.exif_transpose(original).convert("RGB")
         crop = recipe["crop"]
         width, height = image.size
         box = (round(crop["x"] * width), round(crop["y"] * height), round((crop["x"] + crop["width"]) * width), round((crop["y"] + crop["height"]) * height))

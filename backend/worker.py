@@ -10,6 +10,7 @@ from .jobs import JobStore
 from .analysis import FeatureStore, analyze
 from .quality import DEFAULT_THRESHOLD, QualityStore, assess
 from .autodevelop import estimate
+from .stacking import group_assets, generation_config, phash
 
 
 class Worker:
@@ -76,6 +77,26 @@ class Worker:
                         errors += 1
                     self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "variants_created": created, "errors": errors})
                 result = {"folder": folder, "analyzed": total - errors, "variants_created": created, "errors": errors}
+            elif job["type"] == "stack_generation":
+                folder = job["scope"].get("folder", "")
+                max_gap = float(job["scope"].get("max_gap_minutes", 15))
+                max_distance = int(job["scope"].get("max_phash_distance", 8))
+                assets = self.catalog.assets_in_scope(folder)
+                total = len(assets)
+                self.jobs.update_progress(job["id"], 0, {"folder": folder, "images_total": total, "images_hashed": 0, "stacks": 0, "errors": 0})
+                try:
+                    hashes, computed, hash_errors = self.catalog.stack_phashes(assets, phash)
+                    usable = [asset for asset in assets if asset.id in hashes]
+                    errors = hash_errors
+                except Exception:
+                    hashes, usable, computed = {}, [], 0
+                    errors = total
+                self.jobs.update_progress(job["id"], 70, {"folder": folder, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": 0, "errors": errors})
+                groups = group_assets(usable, hashes, max_gap, max_distance)
+                config = generation_config(folder, max_gap, max_distance)
+                stored = self.catalog.replace_stack_generation(folder, config, groups)
+                self.jobs.update_progress(job["id"], 100, {"folder": folder, "images_total": total, "images_hashed": len(usable), "stacks": len(groups), "errors": errors})
+                result = {"folder": folder, "images": len(usable), "stacks": len(groups), "errors": errors, **stored}
             elif job["type"] == "catalog_scan":
                 result = self.catalog.scan(job["scope"].get("kind", "incremental"), lambda detail: self.jobs.update_progress(job["id"], detail["percent"], detail))
             else:
