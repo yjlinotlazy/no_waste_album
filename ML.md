@@ -48,8 +48,8 @@ The user can press **wrong prediction** on a model result. The system copies tha
 
 Configured paths:
 
-- ML root: `/home/yli/Dropbox/Photos/no_waste_album/ML`
-- Negative samples: `/home/yli/Dropbox/Photos/no_waste_album/ML/negative_samples`
+- ML root: `<configured ML root>`
+- Negative samples: `<configured ML root>/negative_samples`
 
 These paths must come from `config.yaml`; they must not be hardcoded in application code.
 

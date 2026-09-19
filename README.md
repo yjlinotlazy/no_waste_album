@@ -1,8 +1,6 @@
 # No Waste Album
 
-## POC
-
-This local app serves a local image library with nested folders and demonstrates non-destructive photo editing in the browser.
+This local app serves a local image library with nested folders and browser-based photo management and editing.
 
 Install runtime dependencies once with:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free local POC server for No Waste Album."""
+"""Dependency-free local server for No Waste Album."""
 
 import base64
 import hashlib
@@ -106,16 +106,23 @@ class Library:
         with self.lock:
             self._migrate_legacy_recipes()
         assets, total = self.catalog.page(folder, query, page, page_size, show_hidden, tag=tag)
-        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
+        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
 
     def trash_page(self, page, page_size):
         assets, total = self.catalog.page(folder="", page=page, page_size=page_size, include_trashed=True)
-        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
+        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
 
     def asset_by_id(self, asset_id):
         asset = self.catalog.get(asset_id)
         if not asset: return None
-        return {"id": asset.id, "name": asset.name, "path": asset.relative_path, "folder": asset.folder, "size": asset.size, "modified": asset.modified_ns / 1_000_000_000, "url": "/media/" + asset.relative_path, "hidden": bool(asset.hidden), "tags": self.catalog.tags_for_asset(asset.id), "recipes": self.catalog.variants(asset.id)}
+        return {"id": asset.id, "name": asset.name, "path": asset.relative_path, "folder": asset.folder, "size": asset.size, "modified": asset.modified_ns / 1_000_000_000, "url": "/media/" + asset.relative_path, "thumbnail_url": self.thumbnail_url(asset.id), "hidden": bool(asset.hidden), "tags": self.catalog.tags_for_asset(asset.id), "recipes": self.catalog.variants(asset.id)}
+
+    def thumbnail_path(self, asset_id):
+        path = self.catalog.thumbnail_path(asset_id)
+        return path if path and path.is_file() else None
+
+    def thumbnail_url(self, asset_id):
+        return f"/thumbnails/{asset_id}.jpg" if self.thumbnail_path(asset_id) else None
 
     def source_path(self, asset_id):
         asset = self.catalog.get(asset_id)
@@ -162,7 +169,7 @@ def safe_media_path(library, relative):
 
 
 def load_config(path):
-    """Read the small scalar YAML subset needed by the dependency-free POC."""
+    """Read the small scalar YAML subset needed by the dependency-free server."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -285,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/settings":
-            return self.send_json({"library": str(self.library.root), "page_size": int(self.config.get("page_size", "5")), "stack_max_gap_minutes": float(self.config.get("stack_max_gap_minutes", "15")), "stack_phash_max_distance": int(self.config.get("stack_phash_max_distance", "8"))})
+            return self.send_json({"library": str(self.library.root), "page_size": int(self.config.get("page_size", "5")), "stack_max_gap_minutes": float(self.config.get("stack_max_gap_minutes", "15")), "stack_phash_max_distance": int(self.config.get("stack_phash_max_distance", "20")), "thumbnail_size": int(self.config.get("thumbnail_size", "256")), "thumbnail_quality": int(self.config.get("thumbnail_quality", "88"))})
         if parsed.path == "/api/jobs":
             if not self.operator_only(): return
             return self.send_json({"jobs": self.library.jobs.list()})
@@ -303,12 +310,7 @@ class Handler(BaseHTTPRequestHandler):
                 results, total = self.library.catalog.auto_variants(job["scope"].get("folder", ""), job["id"], page, page_size)
                 return self.send_json({"results": results, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
             if job["type"] == "stack_generation":
-                generation_id = job.get("result", {}).get("generation_id") or job["scope"].get("generation_id")
-                if not generation_id:
-                    with self.library.catalog._connect() as db:
-                        row = db.execute("SELECT id FROM stack_generations WHERE state='active' ORDER BY created_at DESC, rowid DESC LIMIT 1").fetchone()
-                    generation_id = row[0] if row else ""
-                results, total = self.library.catalog.stack_results(generation_id, page, page_size)
+                results, total = self.library.catalog.stack_results(job["scope"].get("folder", ""), page, page_size)
                 return self.send_json({"results": results, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
             bad_only = query.get("bad_only", ["false"])[0].lower() == "true"
             threshold_value = query.get("threshold", [""])[0]
@@ -320,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
             job = self.library.jobs.get(job_match.group(1))
             return self.send_json(job or {"error": "Job not found"}, HTTPStatus.OK if job else HTTPStatus.NOT_FOUND)
         if parsed.path == "/api/folders":
-            return self.send_json({"root": str(self.library.root), "folders": self.library.folders()})
+            return self.send_json({"root": str(self.library.root), "folders": self.library.folders(), "counts": self.library.catalog.folder_counts(), "stack_counts": self.library.catalog.folder_stack_counts()})
         if parsed.path == "/api/tags":
             return self.send_json({"tags": self.library.catalog.tags()})
         asset_match = re.match(r"^/api/assets/([^/]+)$", parsed.path)
@@ -348,6 +350,20 @@ class Handler(BaseHTTPRequestHandler):
             show_hidden = query.get("show_hidden", ["false"])[0].lower() == "true"
             assets, total = self.library.page(folder, search, page, page_size, show_hidden, tag)
             return self.send_json({"root": str(self.library.root), "assets": assets, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
+        if parsed.path.startswith("/thumbnails/"):
+            thumbnail_id = unquote(parsed.path[len("/thumbnails/"):])
+            if not thumbnail_id.endswith(".jpg") or Path(thumbnail_id).name != thumbnail_id:
+                return self.send_json({"error": "Thumbnail not found"}, HTTPStatus.NOT_FOUND)
+            path = self.library.thumbnail_path(Path(thumbnail_id).stem)
+            if not path:
+                return self.send_json({"error": "Thumbnail not found"}, HTTPStatus.NOT_FOUND)
+            data = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return self.wfile.write(data)
         if parsed.path.startswith("/media/"):
             relative = unquote(parsed.path[len("/media/"):])
             path = self.library.media_path(relative)
@@ -370,6 +386,8 @@ class Handler(BaseHTTPRequestHandler):
         target = (self.web_root / relative).resolve()
         if self.web_root not in target.parents and target != self.web_root:
             return self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+        if not target.is_file() and Path(relative).suffix == "":
+            target = self.web_root / "index.html"
         if not target.is_file():
             return self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
         data = target.read_bytes()
@@ -450,7 +468,10 @@ class Handler(BaseHTTPRequestHandler):
                 scope = dict(payload.get("scope", {}))
                 if job_type == "stack_generation":
                     scope.setdefault("max_gap_minutes", float(self.config.get("stack_max_gap_minutes", "15")))
-                    scope.setdefault("max_phash_distance", int(self.config.get("stack_phash_max_distance", "8")))
+                    scope.setdefault("max_phash_distance", int(self.config.get("stack_phash_max_distance", "20")))
+                if job_type == "thumbnail_generation":
+                    scope.setdefault("thumbnail_size", int(self.config.get("thumbnail_size", "256")))
+                    scope.setdefault("thumbnail_quality", int(self.config.get("thumbnail_quality", "88")))
                 job = self.library.jobs.create(job_type, scope)
             except ValueError as error:
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -586,7 +607,7 @@ def main():
     Handler.config = config
     Handler.library = Library(root, data_dir)
     server = ThreadingHTTPServer((host, port), Handler)
-    print("No Waste Album POC: http://%s:%s" % (host, port), flush=True)
+    print("No Waste Album: http://%s:%s" % (host, port), flush=True)
     print("Library: %s" % Handler.library.root, flush=True)
     Handler.library.start_initial_scan()
     try: server.serve_forever()

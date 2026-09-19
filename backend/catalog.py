@@ -105,34 +105,32 @@ class Catalog:
                     FOREIGN KEY(tag_name) REFERENCES tags(name) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_name);
-                CREATE TABLE IF NOT EXISTS stack_generations (
-                    id TEXT PRIMARY KEY,
-                    scope_json TEXT NOT NULL,
-                    config_json TEXT NOT NULL,
-                    state TEXT NOT NULL DEFAULT 'active',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
                 CREATE TABLE IF NOT EXISTS stacks (
                     id TEXT PRIMARY KEY,
-                    generation_id TEXT NOT NULL,
                     folder TEXT NOT NULL,
                     representative_asset_id TEXT NOT NULL,
                     locked INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(generation_id) REFERENCES stack_generations(id) ON DELETE CASCADE,
                     FOREIGN KEY(representative_asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_stacks_generation ON stacks(generation_id);
                 CREATE TABLE IF NOT EXISTS stack_members (
-                    generation_id TEXT NOT NULL,
                     stack_id TEXT NOT NULL,
                     asset_id TEXT NOT NULL,
                     ordinal INTEGER NOT NULL,
-                    PRIMARY KEY(generation_id, stack_id, asset_id),
-                    FOREIGN KEY(generation_id) REFERENCES stack_generations(id) ON DELETE CASCADE,
+                    PRIMARY KEY(stack_id, asset_id),
                     FOREIGN KEY(stack_id) REFERENCES stacks(id) ON DELETE CASCADE,
                     FOREIGN KEY(asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_stack_members_asset ON stack_members(asset_id);
+                CREATE TABLE IF NOT EXISTS thumbnails (
+                    asset_id TEXT PRIMARY KEY,
+                    content_fingerprint TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    version TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS stack_phashes (
                     asset_id TEXT PRIMARY KEY,
                     content_fingerprint TEXT NOT NULL,
@@ -143,6 +141,29 @@ class Catalog:
                 );
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(catalog_assets)")}
+            stack_columns = {row[1] for row in db.execute("PRAGMA table_info(stacks)")}
+            if "generation_id" in stack_columns:
+                db.execute("DROP TABLE IF EXISTS stack_members")
+                db.execute("DROP TABLE IF EXISTS stacks")
+                db.execute("DROP TABLE IF EXISTS stack_generations")
+                db.executescript("""
+                    CREATE TABLE stacks (
+                        id TEXT PRIMARY KEY,
+                        folder TEXT NOT NULL,
+                        representative_asset_id TEXT NOT NULL,
+                        locked INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY(representative_asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE stack_members (
+                        stack_id TEXT NOT NULL,
+                        asset_id TEXT NOT NULL,
+                        ordinal INTEGER NOT NULL,
+                        PRIMARY KEY(stack_id, asset_id),
+                        FOREIGN KEY(stack_id) REFERENCES stacks(id) ON DELETE CASCADE,
+                        FOREIGN KEY(asset_id) REFERENCES catalog_assets(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX idx_stack_members_asset ON stack_members(asset_id);
+                """)
             if "hidden" not in columns:
                 db.execute("ALTER TABLE catalog_assets ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
             quality_columns = {row[1] for row in db.execute("PRAGMA table_info(quality_assessments)")}
@@ -169,6 +190,10 @@ class Catalog:
                     SELECT asset_id,COALESCE(job_id,'legacy'),detector_version,modified_ns,badness_score,threshold,is_bad,details_json,created_at
                     FROM quality_assessments_legacy""")
                 db.execute("DROP TABLE quality_assessments_legacy")
+            data_dir = self.database_path.parent.resolve()
+            if data_dir != self.root and self.root in data_dir.parents:
+                relative_data_dir = data_dir.relative_to(self.root).as_posix()
+                db.execute("UPDATE catalog_assets SET status='missing' WHERE relative_path=? OR relative_path LIKE ?", (relative_data_dir, relative_data_dir.rstrip("/") + "/%"))
 
     @staticmethod
     def _asset_id(relative_path: str, fingerprint: str | None = None) -> str:
@@ -185,6 +210,8 @@ class Catalog:
         return digest.hexdigest()
 
     def _iter_images(self) -> Iterable[tuple[Path, str]]:
+        data_dir = self.database_path.parent.resolve()
+
         def walk(folder: Path):
             try:
                 entries = sorted(os.scandir(folder), key=lambda entry: entry.name.casefold())
@@ -193,6 +220,8 @@ class Catalog:
             for entry in entries:
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name.casefold() == "raw":
+                        continue
+                    if Path(entry.path).resolve() == data_dir:
                         continue
                     yield from walk(Path(entry.path))
                 elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.casefold() in IMAGE_EXTENSIONS:
@@ -247,10 +276,37 @@ class Catalog:
         with closing(self._connect()) as db:
             return [row[0] for row in db.execute("SELECT DISTINCT folder FROM catalog_assets WHERE status='available' ORDER BY folder COLLATE NOCASE") if row[0]]
 
+    def folder_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with closing(self._connect()) as db:
+            folders = db.execute("SELECT folder FROM catalog_assets WHERE status='available'").fetchall()
+        for (folder,) in folders:
+            parts = [part for part in folder.split("/") if part]
+            for index in range(1, len(parts) + 1):
+                current = "/".join(parts[:index])
+                counts[current] = counts.get(current, 0) + 1
+        return counts
+
+    def folder_stack_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with closing(self._connect()) as db:
+            folders = [row[0] for row in db.execute("SELECT folder FROM stacks")]
+        for folder in folders:
+            parts = [part for part in folder.split("/") if part]
+            for index in range(1, len(parts) + 1):
+                current = "/".join(parts[:index])
+                counts[current] = counts.get(current, 0) + 1
+        return counts
+
     def get(self, asset_id: str) -> CatalogAsset | None:
         with closing(self._connect()) as db:
             row = db.execute("SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE id=?", (asset_id,)).fetchone()
         return CatalogAsset(**dict(row)) if row else None
+
+    def content_fingerprint(self, asset_id: str) -> str | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT content_fingerprint FROM catalog_assets WHERE id=?", (asset_id,)).fetchone()
+        return row[0] if row else None
 
     def assets_in_scope(self, folder: str, include_hidden: bool = False) -> list[CatalogAsset]:
         if folder:
@@ -265,48 +321,99 @@ class Catalog:
             rows = db.execute(f"SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE {where} ORDER BY modified_ns ASC, relative_path COLLATE NOCASE", params).fetchall()
         return [CatalogAsset(**dict(row)) for row in rows]
 
-    def stack_phashes(self, assets, hasher) -> tuple[dict[str, int], int]:
+    def stack_phashes(self, assets, hasher, on_progress=None) -> tuple[dict[str, int], int, int]:
         hashes: dict[str, int] = {}
         computed = 0
         errors = 0
+        total = len(assets)
         with closing(self._connect()) as db, db:
-            for asset in assets:
+            for index, asset in enumerate(assets, 1):
                 fingerprint = db.execute("SELECT content_fingerprint FROM catalog_assets WHERE id=?", (asset.id,)).fetchone()[0]
                 cached = db.execute("SELECT hash_value,hash_version FROM stack_phashes WHERE asset_id=? AND content_fingerprint=?", (asset.id, fingerprint)).fetchone()
                 if cached and cached[1] == "phash64-v1":
                     hashes[asset.id] = int(cached[0], 16)
+                    if on_progress:
+                        on_progress(index, total, len(hashes), computed, errors)
                     continue
                 try:
                     value = hasher(self.root / asset.relative_path)
                 except Exception:
                     errors += 1
+                    if on_progress:
+                        on_progress(index, total, len(hashes), computed, errors)
                     continue
                 hashes[asset.id] = value
                 db.execute("INSERT OR REPLACE INTO stack_phashes(asset_id,content_fingerprint,hash_value,hash_version) VALUES (?,?,?,?)", (asset.id, fingerprint, f"{value:016x}", "phash64-v1"))
                 computed += 1
+                if on_progress:
+                    on_progress(index, total, len(hashes), computed, errors)
         return hashes, computed, errors
 
-    def replace_stack_generation(self, scope: str, config: dict, grouped: list[list[CatalogAsset]]) -> dict:
-        generation_id = uuid.uuid4().hex
+    def thumbnail_record(self, asset_id: str):
+        with closing(self._connect()) as db:
+            return db.execute("SELECT content_fingerprint,relative_path,width,height,version FROM thumbnails WHERE asset_id=?", (asset_id,)).fetchone()
+
+    def thumbnail_path(self, asset_id: str) -> Path | None:
+        record = self.thumbnail_record(asset_id)
+        if not record:
+            return None
+        root = (self.database_path.parent / "thumbnails").resolve()
+        path = (self.database_path.parent / record[1]).resolve()
+        if path != root and root not in path.parents:
+            return None
+        return path
+
+    def _remove_orphan_thumbnails(self) -> int:
+        root = (self.database_path.parent / "thumbnails").resolve()
+        if not root.is_dir():
+            return 0
+        with closing(self._connect()) as db:
+            referenced = {Path(row[0]).name for row in db.execute("SELECT relative_path FROM thumbnails")}
+        removed = 0
+        for path in root.glob("*.jpg"):
+            if path.name not in referenced:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    def save_thumbnail_record(self, asset_id: str, fingerprint: str, relative_path: str, width: int, height: int, version: str) -> None:
         with closing(self._connect()) as db, db:
-            db.execute("UPDATE stack_generations SET state='backup' WHERE state='active'")
-            db.execute("DELETE FROM stack_generations WHERE state='backup' AND id != (SELECT id FROM stack_generations WHERE state='backup' ORDER BY created_at DESC, rowid DESC LIMIT 1)")
-            db.execute("INSERT INTO stack_generations(id,scope_json,config_json,state) VALUES (?,?,?, 'active')", (generation_id, json.dumps({"folder": scope}), json.dumps(config)))
+            db.execute("INSERT OR REPLACE INTO thumbnails(asset_id,content_fingerprint,relative_path,width,height,version) VALUES (?,?,?,?,?,?)", (asset_id, fingerprint, relative_path, width, height, version))
+
+    def replace_stack_generation(self, scope: str, config: dict, grouped: list[list[CatalogAsset]]) -> dict:
+        with closing(self._connect()) as db, db:
+            if scope:
+                pattern = scope.rstrip("/") + "/%"
+                stack_ids = [row[0] for row in db.execute("SELECT id FROM stacks WHERE folder=? OR folder LIKE ?", (scope, pattern))]
+            else:
+                stack_ids = [row[0] for row in db.execute("SELECT id FROM stacks")]
+            if stack_ids:
+                placeholders = ",".join("?" for _ in stack_ids)
+                db.execute(f"DELETE FROM stack_members WHERE stack_id IN ({placeholders})", stack_ids)
+                db.execute(f"DELETE FROM stacks WHERE id IN ({placeholders})", stack_ids)
             for members in grouped:
                 stack_id = members[0].id if len(members) == 1 else uuid.uuid4().hex
-                db.execute("INSERT INTO stacks(id,generation_id,folder,representative_asset_id) VALUES (?,?,?,?)", (stack_id, generation_id, members[0].folder, members[0].id))
-                db.executemany("INSERT INTO stack_members(generation_id,stack_id,asset_id,ordinal) VALUES (?,?,?,?)", ((generation_id, stack_id, asset.id, ordinal) for ordinal, asset in enumerate(members)))
-        return {"generation_id": generation_id, "stacks": len(grouped), "images": sum(len(group) for group in grouped)}
+                db.execute("INSERT INTO stacks(id,folder,representative_asset_id) VALUES (?,?,?)", (stack_id, members[0].folder, members[0].id))
+                db.executemany("INSERT INTO stack_members(stack_id,asset_id,ordinal) VALUES (?,?,?)", ((stack_id, asset.id, ordinal) for ordinal, asset in enumerate(members)))
+        return {"stacks": len(grouped), "images": sum(len(group) for group in grouped)}
 
-    def stack_results(self, generation_id: str, page: int = 1, page_size: int = 50) -> tuple[list[dict], int]:
+    def stack_results(self, scope: str = "", page: int = 1, page_size: int = 50) -> tuple[list[dict], int]:
         page = max(1, page)
         page_size = max(1, min(200, page_size))
         with closing(self._connect()) as db:
-            total = db.execute("SELECT COUNT(*) FROM stacks s JOIN stack_generations g ON g.id=s.generation_id WHERE s.generation_id=? AND g.state='active'", (generation_id,)).fetchone()[0]
-            rows = db.execute("SELECT s.id,s.folder,s.representative_asset_id,a.name,a.relative_path,COUNT(m.asset_id) FROM stacks s JOIN stack_generations g ON g.id=s.generation_id JOIN catalog_assets a ON a.id=s.representative_asset_id JOIN stack_members m ON m.stack_id=s.id AND m.generation_id=s.generation_id WHERE s.generation_id=? AND g.state='active' GROUP BY s.id ORDER BY s.folder,a.modified_ns LIMIT ? OFFSET ?", (generation_id, page_size, (page - 1) * page_size)).fetchall()
+            where = ""
+            params: tuple = ()
+            if scope:
+                where = " WHERE s.folder=? OR s.folder LIKE ?"
+                params = (scope, scope.rstrip("/") + "/%")
+            total = db.execute(f"SELECT COUNT(*) FROM stacks s{where}", params).fetchone()[0]
+            rows = db.execute(f"SELECT s.id,s.folder,s.representative_asset_id,a.name,a.relative_path,COUNT(m.asset_id) FROM stacks s JOIN catalog_assets a ON a.id=s.representative_asset_id JOIN stack_members m ON m.stack_id=s.id{where} GROUP BY s.id ORDER BY COUNT(m.asset_id) DESC, s.folder, a.modified_ns LIMIT ? OFFSET ?", (*params, page_size, (page - 1) * page_size)).fetchall()
             results = []
             for row in rows:
-                members = db.execute("SELECT a.id,a.name,a.relative_path FROM stack_members m JOIN catalog_assets a ON a.id=m.asset_id WHERE m.generation_id=? AND m.stack_id=? ORDER BY m.ordinal", (generation_id, row[0])).fetchall()
+                members = db.execute("SELECT a.id,a.name,a.relative_path FROM stack_members m JOIN catalog_assets a ON a.id=m.asset_id WHERE m.stack_id=? ORDER BY m.ordinal", (row[0],)).fetchall()
                 results.append({"id": row[0], "folder": row[1], "representative_id": row[2], "name": row[3], "relative_path": row[4], "url": "/media/" + row[4], "member_count": row[5], "members": [{"id": member[0], "name": member[1], "relative_path": member[2], "url": "/media/" + member[2]} for member in members]})
         return results, total
 
@@ -474,18 +581,22 @@ class Catalog:
             rows = db.execute("SELECT id, relative_path FROM catalog_assets WHERE status='trashed'").fetchall()
             for row in rows:
                 path = (self.root / row[1]).resolve()
+                thumbnail = self.thumbnail_path(row[0])
                 try:
                     if self.root not in path.parents or any(part.casefold() == "raw" for part in path.relative_to(self.root).parts):
                         raise ValueError("unsafe trash path")
                     path.unlink(missing_ok=True)
+                    if thumbnail:
+                        thumbnail.unlink(missing_ok=True)
                     db.execute("DELETE FROM catalog_assets WHERE id=?", (row[0],))
                     removed_ids.append(row[0])
                     removed += 1
                 except (OSError, ValueError) as error:
                     errors.append(f"{row[1]}: {error}")
+        thumbnails_removed = self._remove_orphan_thumbnails()
         feature_database = self.database_path.parent / "features.sqlite"
         if removed_ids and feature_database.exists():
             with closing(sqlite3.connect(feature_database)) as features, features:
                 placeholders = ",".join("?" for _ in removed_ids)
                 features.execute(f"DELETE FROM image_features WHERE asset_id IN ({placeholders})", removed_ids)
-        return {"deleted": removed, "errors": errors}
+        return {"deleted": removed, "thumbnails_deleted": thumbnails_removed, "errors": errors}

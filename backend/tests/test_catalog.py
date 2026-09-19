@@ -24,6 +24,34 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(total, 1)
             self.assertEqual(assets[0].relative_path, "2026/photo.jpg")
 
+    def test_catalog_data_directory_is_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026" / "photo.jpg").parent.mkdir(parents=True)
+            (root / "2026" / "photo.jpg").write_bytes(b"photo")
+            data_dir = root / "no_waste_album"
+            (data_dir / "thumbnails").mkdir(parents=True)
+            (data_dir / "thumbnails" / "not-a-photo.jpg").write_bytes(b"thumbnail")
+            catalog = Catalog(root, data_dir / "catalog.sqlite")
+
+            result = catalog.scan("full")
+
+            self.assertEqual(result["seen"], 1)
+            self.assertEqual(catalog.page()[1], 1)
+
+    def test_folder_counts_include_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "2026" / "trip").mkdir(parents=True)
+            (root / "2026" / "other.jpg").write_bytes(b"other")
+            (root / "2026" / "trip" / "photo.jpg").write_bytes(b"photo")
+            (root / "raw" / "2026").mkdir(parents=True)
+            (root / "raw" / "2026" / "ignored.jpg").write_bytes(b"ignored")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+
+            self.assertEqual(catalog.folder_counts(), {"2026": 2, "2026/trip": 1})
+
     def test_unchanged_files_are_not_rehashed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,6 +152,38 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(result["deleted"], 1)
             self.assertFalse(image.exists())
             self.assertEqual(catalog.page(show_hidden=True, include_trashed=True)[1], 0)
+
+    def test_clear_trash_deletes_thumbnail_file_and_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "photo.jpg"
+            image.write_bytes(b"photo")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            asset = catalog.page()[0][0]
+            thumbnail = root / "thumbnails" / f"{asset.id}.jpg"
+            thumbnail.parent.mkdir()
+            thumbnail.write_bytes(b"thumbnail")
+            catalog.save_thumbnail_record(asset.id, catalog.content_fingerprint(asset.id), f"thumbnails/{asset.id}.jpg", 10, 10, "thumbnail-v1")
+            catalog.bulk_update([asset.id], "trash")
+
+            catalog.clear_trash()
+
+            self.assertFalse(thumbnail.exists())
+            self.assertIsNone(catalog.thumbnail_record(asset.id))
+
+    def test_clear_trash_removes_orphan_thumbnail_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "thumbnails").mkdir()
+            orphan = root / "thumbnails" / "orphan.jpg"
+            orphan.write_bytes(b"thumbnail")
+            catalog = Catalog(root, root / "catalog.sqlite")
+
+            result = catalog.clear_trash()
+
+            self.assertEqual(result["thumbnails_deleted"], 1)
+            self.assertFalse(orphan.exists())
 
     def test_clear_trash_removes_separate_feature_record(self):
         with tempfile.TemporaryDirectory() as tmp:

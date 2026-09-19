@@ -11,6 +11,7 @@ from .analysis import FeatureStore, analyze
 from .quality import DEFAULT_THRESHOLD, QualityStore, assess
 from .autodevelop import estimate
 from .stacking import group_assets, generation_config, phash
+from .thumbnails import THUMBNAIL_VERSION, render as render_thumbnail
 
 
 class Worker:
@@ -77,26 +78,61 @@ class Worker:
                         errors += 1
                     self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "variants_created": created, "errors": errors})
                 result = {"folder": folder, "analyzed": total - errors, "variants_created": created, "errors": errors}
+            elif job["type"] == "thumbnail_generation":
+                folder = job["scope"].get("folder", "")
+                size = int(job["scope"].get("thumbnail_size", 256))
+                quality = int(job["scope"].get("thumbnail_quality", 88))
+                clean_start = bool(job["scope"].get("clean_start", False))
+                assets = self.catalog.assets_in_scope(folder)
+                total = len(assets)
+                created = 0
+                skipped = 0
+                errors = 0
+                thumbnail_dir = self.catalog.database_path.parent / "thumbnails"
+                self.jobs.update_progress(job["id"], 0, {"folder": folder, "images_scanned": 0, "images_total": total, "thumbnails_created": 0, "thumbnails_skipped": 0, "errors": 0})
+                for index, asset in enumerate(assets, 1):
+                    current = self.jobs.get(job["id"])
+                    if current["state"] == "cancelled":
+                        return current
+                    try:
+                        target = thumbnail_dir / f"{asset.id}.jpg"
+                        fingerprint = self.catalog.content_fingerprint(asset.id)
+                        record = self.catalog.thumbnail_record(asset.id)
+                        if not clean_start and record and record[0] == fingerprint and record[1] == f"thumbnails/{asset.id}.jpg" and record[4] == THUMBNAIL_VERSION and target.is_file():
+                            skipped += 1
+                        else:
+                            width, height = render_thumbnail(self.catalog.root / asset.relative_path, target, size, quality)
+                            self.catalog.save_thumbnail_record(asset.id, fingerprint, f"thumbnails/{asset.id}.jpg", width, height, THUMBNAIL_VERSION)
+                            created += 1
+                    except Exception:
+                        errors += 1
+                    self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "thumbnails_created": created, "thumbnails_skipped": skipped, "errors": errors})
+                result = {"folder": folder, "analyzed": total - errors, "thumbnails_created": created, "thumbnails_skipped": skipped, "errors": errors}
             elif job["type"] == "stack_generation":
                 folder = job["scope"].get("folder", "")
                 max_gap = float(job["scope"].get("max_gap_minutes", 15))
-                max_distance = int(job["scope"].get("max_phash_distance", 8))
+                max_distance = int(job["scope"].get("max_phash_distance", 20))
                 assets = self.catalog.assets_in_scope(folder)
                 total = len(assets)
-                self.jobs.update_progress(job["id"], 0, {"folder": folder, "images_total": total, "images_hashed": 0, "stacks": 0, "errors": 0})
+                self.jobs.update_progress(job["id"], 0, {"folder": folder, "stage": "hashing", "stage_processed": 0, "stage_total": total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": 0, "stacks": 0, "errors": 0})
+                def report_hash_progress(index, image_total, hashed, hashes_computed, hash_errors):
+                    if index == image_total or index % 10 == 0:
+                        self.jobs.update_progress(job["id"], round(index / max(1, image_total) * 70), {"folder": folder, "stage": "hashing", "stage_processed": index, "stage_total": image_total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": image_total, "images_hashed": hashed, "hashes_computed": hashes_computed, "stacks": 0, "errors": hash_errors})
+
                 try:
-                    hashes, computed, hash_errors = self.catalog.stack_phashes(assets, phash)
+                    hashes, computed, hash_errors = self.catalog.stack_phashes(assets, phash, report_hash_progress)
                     usable = [asset for asset in assets if asset.id in hashes]
                     errors = hash_errors
                 except Exception:
                     hashes, usable, computed = {}, [], 0
                     errors = total
-                self.jobs.update_progress(job["id"], 70, {"folder": folder, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": 0, "errors": errors})
+                self.jobs.update_progress(job["id"], 70, {"folder": folder, "stage": "grouping", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": 0, "errors": errors})
                 groups = group_assets(usable, hashes, max_gap, max_distance)
                 config = generation_config(folder, max_gap, max_distance)
+                self.jobs.update_progress(job["id"], 85, {"folder": folder, "stage": "storing", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": len(groups), "errors": errors})
                 stored = self.catalog.replace_stack_generation(folder, config, groups)
-                self.jobs.update_progress(job["id"], 100, {"folder": folder, "images_total": total, "images_hashed": len(usable), "stacks": len(groups), "errors": errors})
-                result = {"folder": folder, "images": len(usable), "stacks": len(groups), "errors": errors, **stored}
+                self.jobs.update_progress(job["id"], 100, {"folder": folder, "stage": "storing", "stage_processed": 1, "stage_total": 1, "max_gap_minutes": max_gap, "images_total": total, "max_phash_distance": max_distance, "images_hashed": len(usable), "stacks": len(groups), "errors": errors})
+                result = {"folder": folder, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images": len(usable), "stacks": len(groups), "errors": errors, **stored}
             elif job["type"] == "catalog_scan":
                 result = self.catalog.scan(job["scope"].get("kind", "incremental"), lambda detail: self.jobs.update_progress(job["id"], detail["percent"], detail))
             else:

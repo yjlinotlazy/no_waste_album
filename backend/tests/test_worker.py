@@ -100,10 +100,69 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result["state"], "completed")
             self.assertEqual(result["result"]["images"], 3)
             self.assertEqual(result["result"]["stacks"], 1)
-            generation = catalog._connect().execute("SELECT id FROM stack_generations WHERE state='active'").fetchone()[0]
-            stacks, total = catalog.stack_results(generation)
+            stacks, total = catalog.stack_results("album")
             self.assertEqual(total, 1)
             self.assertEqual(stacks[0]["member_count"], 3)
+
+    def test_stack_generation_replaces_previous_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "album").mkdir()
+            Image.new("RGB", (160, 120), "black").save(root / "album" / "first.jpg")
+            Image.new("RGB", (160, 120), "white").save(root / "album" / "second.jpg")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            jobs = JobStore(root / "jobs.sqlite")
+            first = jobs.create("stack_generation", {"folder": "album", "max_gap_minutes": 15, "max_phash_distance": 0})
+            second = jobs.create("stack_generation", {"folder": "album", "max_gap_minutes": 15, "max_phash_distance": 63})
+
+            first_result = Worker(jobs, catalog).run_once()
+            second_result = Worker(jobs, catalog).run_once()
+
+            self.assertEqual(first_result["state"], "completed")
+            self.assertEqual(second_result["state"], "completed")
+            self.assertEqual(catalog.stack_results("album")[1], 1)
+
+    def test_stack_results_are_ranked_by_member_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "album").mkdir()
+            for name in ("first.jpg", "second.jpg", "third.jpg"):
+                Image.new("RGB", (40, 40), "black").save(root / "album" / name)
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            assets = catalog.assets_in_scope("album")
+
+            catalog.replace_stack_generation("album", {}, [[assets[0]], [assets[1], assets[2]]])
+
+            results, total = catalog.stack_results("album")
+            self.assertEqual(total, 2)
+            self.assertEqual([result["member_count"] for result in results], [2, 1])
+
+    def test_worker_generates_and_reuses_thumbnails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "album").mkdir()
+            Image.new("RGB", (800, 600), "red").save(root / "album" / "photo.jpg")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            jobs = JobStore(root / "jobs.sqlite")
+
+            first = jobs.create("thumbnail_generation", {"folder": "album", "thumbnail_size": 256, "thumbnail_quality": 88})
+            first_result = Worker(jobs, catalog).run_once()
+            second = jobs.create("thumbnail_generation", {"folder": "album", "thumbnail_size": 256, "thumbnail_quality": 88})
+            second_result = Worker(jobs, catalog).run_once()
+
+            self.assertEqual(first_result["state"], "completed")
+            self.assertEqual(first_result["result"]["thumbnails_created"], 1)
+            self.assertEqual(second_result["state"], "completed")
+            self.assertEqual(second_result["result"]["thumbnails_skipped"], 1)
+
+            clean = jobs.create("thumbnail_generation", {"folder": "album", "thumbnail_size": 256, "thumbnail_quality": 88, "clean_start": True})
+            clean_result = Worker(jobs, catalog).run_once()
+            self.assertEqual(clean_result["state"], "completed")
+            self.assertEqual(clean_result["result"]["thumbnails_created"], 1)
+            self.assertTrue((root / "thumbnails").exists())
 
 
 if __name__ == "__main__":
