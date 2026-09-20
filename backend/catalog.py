@@ -54,6 +54,7 @@ class Catalog:
                     content_fingerprint TEXT,
                     status TEXT NOT NULL DEFAULT 'available',
                     hidden INTEGER NOT NULL DEFAULT 0,
+                    current_variant_id TEXT,
                     trashed_at TEXT,
                     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -167,6 +168,8 @@ class Catalog:
                 """)
             if "hidden" not in columns:
                 db.execute("ALTER TABLE catalog_assets ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if "current_variant_id" not in columns:
+                db.execute("ALTER TABLE catalog_assets ADD COLUMN current_variant_id TEXT")
             if "trashed_at" not in columns:
                 db.execute("ALTER TABLE catalog_assets ADD COLUMN trashed_at TEXT")
             quality_columns = {row[1] for row in db.execute("PRAGMA table_info(quality_assessments)")}
@@ -324,33 +327,35 @@ class Catalog:
             rows = db.execute(f"SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE {where} ORDER BY modified_ns ASC, relative_path COLLATE NOCASE", params).fetchall()
         return [CatalogAsset(**dict(row)) for row in rows]
 
-    def stack_phashes(self, assets, hasher, on_progress=None) -> tuple[dict[str, int], int, int]:
+    def stack_phashes(self, assets, hasher, on_progress=None, clean_start=False) -> tuple[dict[str, int], int, int, int]:
         hashes: dict[str, int] = {}
         computed = 0
+        skipped = 0
         errors = 0
         total = len(assets)
         with closing(self._connect()) as db, db:
             for index, asset in enumerate(assets, 1):
                 fingerprint = db.execute("SELECT content_fingerprint FROM catalog_assets WHERE id=?", (asset.id,)).fetchone()[0]
                 cached = db.execute("SELECT hash_value,hash_version FROM stack_phashes WHERE asset_id=? AND content_fingerprint=?", (asset.id, fingerprint)).fetchone()
-                if cached and cached[1] == "phash64-v1":
+                if cached and cached[1] == "phash64-v1" and not clean_start:
                     hashes[asset.id] = int(cached[0], 16)
+                    skipped += 1
                     if on_progress:
-                        on_progress(index, total, len(hashes), computed, errors)
+                        on_progress(index, total, len(hashes), computed, skipped, errors)
                     continue
                 try:
                     value = hasher(self.root / asset.relative_path)
                 except Exception:
                     errors += 1
                     if on_progress:
-                        on_progress(index, total, len(hashes), computed, errors)
+                        on_progress(index, total, len(hashes), computed, skipped, errors)
                     continue
                 hashes[asset.id] = value
                 db.execute("INSERT OR REPLACE INTO stack_phashes(asset_id,content_fingerprint,hash_value,hash_version) VALUES (?,?,?,?)", (asset.id, fingerprint, f"{value:016x}", "phash64-v1"))
                 computed += 1
                 if on_progress:
-                    on_progress(index, total, len(hashes), computed, errors)
-        return hashes, computed, errors
+                    on_progress(index, total, len(hashes), computed, skipped, errors)
+        return hashes, computed, skipped, errors
 
     def thumbnail_record(self, asset_id: str):
         with closing(self._connect()) as db:
@@ -486,6 +491,20 @@ class Catalog:
             rows = db.execute("SELECT id, recipe_json FROM variants WHERE asset_id=? ORDER BY created_at, rowid", (asset_id,)).fetchall()
         return [dict(json.loads(row[1]), id=row[0]) for row in rows]
 
+    def current_variant_id(self, asset_id: str) -> str | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT current_variant_id FROM catalog_assets WHERE id=?", (asset_id,)).fetchone()
+        return row[0] if row else None
+
+    def set_current_variant(self, asset_id: str, variant_id: str | None) -> str | None:
+        with closing(self._connect()) as db, db:
+            if variant_id is not None and not db.execute("SELECT 1 FROM variants WHERE asset_id=? AND id=?", (asset_id, variant_id)).fetchone():
+                raise KeyError("variant not found")
+            if not db.execute("SELECT 1 FROM catalog_assets WHERE id=?", (asset_id,)).fetchone():
+                raise KeyError("asset not found")
+            db.execute("UPDATE catalog_assets SET current_variant_id=? WHERE id=?", (variant_id, asset_id))
+        return variant_id
+
     def auto_variants(self, folder: str, job_id: str, page: int = 1, page_size: int = 50) -> tuple[list[dict], int]:
         assets = self.assets_in_scope(folder)
         matches = []
@@ -542,6 +561,8 @@ class Catalog:
     def delete_variant(self, asset_id: str, variant_id: str) -> bool:
         with closing(self._connect()) as db, db:
             result = db.execute("DELETE FROM variants WHERE asset_id=? AND id=?", (asset_id, variant_id))
+            if result.rowcount:
+                db.execute("UPDATE catalog_assets SET current_variant_id=NULL WHERE id=? AND current_variant_id=?", (asset_id, variant_id))
         return result.rowcount == 1
 
     def page(self, folder: str = "", query: str = "", page: int = 1, page_size: int = 50, show_hidden: bool = False, include_trashed: bool = False, tag: str = "", trash_minutes: float | None = None) -> tuple[list[CatalogAsset], int]:

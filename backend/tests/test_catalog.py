@@ -53,6 +53,22 @@ class CatalogTests(unittest.TestCase):
 
             self.assertEqual(catalog.folder_counts(), {"2026": 2, "2026/trip": 1})
 
+    def test_current_variant_is_persisted_and_cleared_on_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "photo.jpg"
+            image.write_bytes(b"photo")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("incremental")
+            asset = catalog.page(page_size=1)[0][0]
+            variant = {"id": "variant-1", "crop": {"x": 0, "y": 0, "width": 1, "height": 1}}
+            catalog.add_variant(asset.id, variant)
+            self.assertIsNone(catalog.current_variant_id(asset.id))
+            catalog.set_current_variant(asset.id, "variant-1")
+            self.assertEqual(catalog.current_variant_id(asset.id), "variant-1")
+            catalog.delete_variant(asset.id, "variant-1")
+            self.assertIsNone(catalog.current_variant_id(asset.id))
+
     def test_unchanged_files_are_not_rehashed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

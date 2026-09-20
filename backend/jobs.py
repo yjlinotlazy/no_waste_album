@@ -7,6 +7,7 @@ from contextlib import closing
 from pathlib import Path
 
 JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "stack_generation", "thumbnail_generation", "clustering", "indexing", "catalog_scan"}
+STALE_RUNNING_SECONDS = 120
 TRANSITIONS = {
     "queued": {"running", "cancelled"},
     "running": {"completed", "failed", "cancelled"},
@@ -56,10 +57,29 @@ class JobStore:
         result["progress_detail"] = json.loads(result["progress_detail"])
         return result
 
-    def list(self, limit: int = 100) -> list[dict]:
+    def list(self, limit: int = 100, offset: int = 0) -> list[dict]:
+        self.reconcile_stale()
         with closing(self._connect()) as db:
-            rows = db.execute("SELECT id FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (max(1, min(500, limit)),)).fetchall()
+            rows = db.execute("SELECT id FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?", (max(1, min(500, limit)), max(0, offset))).fetchall()
         return [self.get(row[0]) for row in rows]
+
+    def count(self) -> int:
+        self.reconcile_stale()
+        with closing(self._connect()) as db:
+            return db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    def reconcile_stale(self, stale_after_seconds: int = STALE_RUNNING_SECONDS) -> int:
+        """Mark interrupted workers as failed while leaving queued jobs alone."""
+        seconds = max(1, int(stale_after_seconds))
+        with closing(self._connect()) as db, db:
+            result = db.execute(
+                """UPDATE jobs
+                   SET state='failed', error=COALESCE(error, 'worker interrupted'), updated_at=CURRENT_TIMESTAMP
+                 WHERE state='running'
+                   AND updated_at < datetime('now', ?)""",
+                (f"-{seconds} seconds",),
+            )
+        return result.rowcount
 
     def update_progress(self, job_id: str, progress: int, detail: dict | None = None) -> dict:
         with closing(self._connect()) as db, db:

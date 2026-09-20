@@ -49,21 +49,28 @@ class Library:
         self.scan_state = "pending"
         self.scan_result = None
         self.thumbnail_queue = queue.Queue()
-        self.thumbnail_queue_thread = threading.Thread(target=self._run_thumbnail_queue, name="thumbnail-job-queue", daemon=True)
+        self.stack_queue = queue.Queue()
+        self.thumbnail_queue_thread = threading.Thread(target=self._run_serial_queue, args=(self.thumbnail_queue,), name="thumbnail-job-queue", daemon=True)
+        self.stack_queue_thread = threading.Thread(target=self._run_serial_queue, args=(self.stack_queue,), name="stack-job-queue", daemon=True)
         self.thumbnail_queue_thread.start()
+        self.stack_queue_thread.start()
         for pending in reversed(self.jobs.list(500)):
-            if pending["type"] == "thumbnail_generation" and pending["state"] == "queued":
+            if pending["state"] != "queued":
+                continue
+            if pending["type"] == "thumbnail_generation":
                 self.thumbnail_queue.put(pending)
+            elif pending["type"] == "stack_generation":
+                self.stack_queue.put(pending)
 
-    def _run_thumbnail_queue(self):
+    def _run_serial_queue(self, job_queue):
         while True:
-            job = self.thumbnail_queue.get()
+            job = job_queue.get()
             try:
                 current = self.jobs.get(job["id"])
                 if current and current["state"] == "queued":
                     Worker(self.jobs, self.catalog).run_job(current)
             finally:
-                self.thumbnail_queue.task_done()
+                job_queue.task_done()
 
     def _migrate_legacy_recipes(self):
         legacy_path = self.data_dir / "recipes.json"
@@ -112,6 +119,9 @@ class Library:
         if job["type"] == "thumbnail_generation":
             self.thumbnail_queue.put(job)
             return
+        if job["type"] == "stack_generation":
+            self.stack_queue.put(job)
+            return
         def run():
             Worker(self.jobs, self.catalog).run_job(job)
         threading.Thread(target=run, name=f"job-{job['id']}", daemon=True).start()
@@ -126,11 +136,11 @@ class Library:
         with self.lock:
             self._migrate_legacy_recipes()
         assets, total = self.catalog.page(folder, query, page, page_size, show_hidden, tag=tag)
-        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
+        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id), "current_variant_id": self.catalog.current_variant_id(a.id)} for a in assets], total
 
     def trash_page(self, page, page_size, minutes=None):
         assets, total = self.catalog.page(folder="", page=page, page_size=page_size, include_trashed=True, trash_minutes=minutes)
-        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
+        return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id), "current_variant_id": self.catalog.current_variant_id(a.id)} for a in assets], total
 
     def asset_by_id(self, asset_id):
         asset = self.catalog.get(asset_id)
@@ -315,7 +325,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"library": str(self.library.root), "page_size": int(self.config.get("page_size", "5")), "stack_max_gap_minutes": float(self.config.get("stack_max_gap_minutes", "15")), "stack_phash_max_distance": int(self.config.get("stack_phash_max_distance", "20")), "thumbnail_size": int(self.config.get("thumbnail_size", "256")), "thumbnail_quality": int(self.config.get("thumbnail_quality", "88"))})
         if parsed.path == "/api/jobs":
             if not self.operator_only(): return
-            return self.send_json({"jobs": self.library.jobs.list()})
+            query = parse_qs(parsed.query)
+            try:
+                page_size = max(1, min(100, int(query.get("page_size", [query.get("limit", ["10"])[0]])[0])))
+                page = max(1, int(query.get("page", ["1"])[0]))
+            except ValueError:
+                return self.send_json({"error": "invalid job pagination"}, HTTPStatus.BAD_REQUEST)
+            total = self.library.jobs.count()
+            jobs = self.library.jobs.list(page_size, (page - 1) * page_size)
+            return self.send_json({"jobs": jobs, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
         result_match = re.match(r"^/api/jobs/([^/]+)/results$", parsed.path)
         if result_match:
             job = self.library.jobs.get(result_match.group(1))
@@ -524,6 +542,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/refresh":
             if not self.operator_only(): return
             return self.send_json(self.library.start_full_scan_job(), HTTPStatus.ACCEPTED)
+        current_variant_match = re.match(r"^/api/assets/([^/]+)/current-variant$", parsed.path)
+        if current_variant_match:
+            if not self.operator_only(): return
+            asset_id = current_variant_match.group(1)
+            variant_id = self.body_json().get("variant_id")
+            with self.library.lock:
+                try:
+                    current_variant_id = self.library.catalog.set_current_variant(asset_id, variant_id or None)
+                except KeyError as error:
+                    return self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            return self.send_json({"asset_id": asset_id, "current_variant_id": current_variant_id})
         if parsed.path == "/api/recipes":
             if not self.operator_only(): return
             payload = self.body_json()

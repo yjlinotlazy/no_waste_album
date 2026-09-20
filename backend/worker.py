@@ -112,26 +112,27 @@ class Worker:
                 folder = job["scope"].get("folder", "")
                 max_gap = float(job["scope"].get("max_gap_minutes", 15))
                 max_distance = int(job["scope"].get("max_phash_distance", 20))
+                clean_start = bool(job["scope"].get("clean_start", False))
                 assets = self.catalog.assets_in_scope(folder)
                 total = len(assets)
-                self.jobs.update_progress(job["id"], 0, {"folder": folder, "stage": "hashing", "stage_processed": 0, "stage_total": total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": 0, "stacks": 0, "errors": 0})
-                def report_hash_progress(index, image_total, hashed, hashes_computed, hash_errors):
+                self.jobs.update_progress(job["id"], 0, {"folder": folder, "stage": "hashing", "stage_processed": 0, "stage_total": total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "clean_start": clean_start, "images_total": total, "images_hashed": 0, "hashes_computed": 0, "hashes_skipped": 0, "stacks": 0, "errors": 0})
+                def report_hash_progress(index, image_total, hashed, hashes_computed, hashes_skipped, hash_errors):
                     if index == image_total or index % 10 == 0:
-                        self.jobs.update_progress(job["id"], round(index / max(1, image_total) * 70), {"folder": folder, "stage": "hashing", "stage_processed": index, "stage_total": image_total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": image_total, "images_hashed": hashed, "hashes_computed": hashes_computed, "stacks": 0, "errors": hash_errors})
+                        self.jobs.update_progress(job["id"], round(index / max(1, image_total) * 70), {"folder": folder, "stage": "hashing", "stage_processed": index, "stage_total": image_total, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "clean_start": clean_start, "images_total": image_total, "images_hashed": hashed, "hashes_computed": hashes_computed, "hashes_skipped": hashes_skipped, "stacks": 0, "errors": hash_errors})
 
                 try:
-                    hashes, computed, hash_errors = self.catalog.stack_phashes(assets, phash, report_hash_progress)
+                    hashes, computed, skipped, hash_errors = self.catalog.stack_phashes(assets, phash, report_hash_progress, clean_start=clean_start)
                     usable = [asset for asset in assets if asset.id in hashes]
                     errors = hash_errors
                 except Exception:
-                    hashes, usable, computed = {}, [], 0
+                    hashes, usable, computed, skipped = {}, [], 0, 0
                     errors = total
-                self.jobs.update_progress(job["id"], 70, {"folder": folder, "stage": "grouping", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": 0, "errors": errors})
+                self.jobs.update_progress(job["id"], 70, {"folder": folder, "stage": "grouping", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "clean_start": clean_start, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "hashes_skipped": skipped, "stacks": 0, "errors": errors})
                 groups = group_assets(usable, hashes, max_gap, max_distance)
                 config = generation_config(folder, max_gap, max_distance)
-                self.jobs.update_progress(job["id"], 85, {"folder": folder, "stage": "storing", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "stacks": len(groups), "errors": errors})
+                self.jobs.update_progress(job["id"], 85, {"folder": folder, "stage": "storing", "stage_processed": 0, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "clean_start": clean_start, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "hashes_skipped": skipped, "stacks": len(groups), "errors": errors})
                 stored = self.catalog.replace_stack_generation(folder, config, groups)
-                self.jobs.update_progress(job["id"], 100, {"folder": folder, "stage": "storing", "stage_processed": 1, "stage_total": 1, "max_gap_minutes": max_gap, "images_total": total, "max_phash_distance": max_distance, "images_hashed": len(usable), "stacks": len(groups), "errors": errors})
+                self.jobs.update_progress(job["id"], 100, {"folder": folder, "stage": "storing", "stage_processed": 1, "stage_total": 1, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "clean_start": clean_start, "images_total": total, "images_hashed": len(usable), "hashes_computed": computed, "hashes_skipped": skipped, "stacks": len(groups), "errors": errors})
                 result = {"folder": folder, "max_gap_minutes": max_gap, "max_phash_distance": max_distance, "images": len(usable), "stacks": len(groups), "errors": errors, **stored}
             elif job["type"] == "catalog_scan":
                 result = self.catalog.scan(job["scope"].get("kind", "incremental"), lambda detail: self.jobs.update_progress(job["id"], detail["percent"], detail))
