@@ -54,6 +54,7 @@ class Catalog:
                     content_fingerprint TEXT,
                     status TEXT NOT NULL DEFAULT 'available',
                     hidden INTEGER NOT NULL DEFAULT 0,
+                    trashed_at TEXT,
                     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -166,6 +167,8 @@ class Catalog:
                 """)
             if "hidden" not in columns:
                 db.execute("ALTER TABLE catalog_assets ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if "trashed_at" not in columns:
+                db.execute("ALTER TABLE catalog_assets ADD COLUMN trashed_at TEXT")
             quality_columns = {row[1] for row in db.execute("PRAGMA table_info(quality_assessments)")}
             if "job_id" not in quality_columns:
                 db.execute("ALTER TABLE quality_assessments ADD COLUMN job_id TEXT")
@@ -541,12 +544,15 @@ class Catalog:
             result = db.execute("DELETE FROM variants WHERE asset_id=? AND id=?", (asset_id, variant_id))
         return result.rowcount == 1
 
-    def page(self, folder: str = "", query: str = "", page: int = 1, page_size: int = 50, show_hidden: bool = False, include_trashed: bool = False, tag: str = "") -> tuple[list[CatalogAsset], int]:
+    def page(self, folder: str = "", query: str = "", page: int = 1, page_size: int = 50, show_hidden: bool = False, include_trashed: bool = False, tag: str = "", trash_minutes: float | None = None) -> tuple[list[CatalogAsset], int]:
         page = max(1, page)
         page_size = max(1, min(200, page_size))
         clauses = ["status='trashed'" if include_trashed else "status='available'"]
         if not show_hidden and not include_trashed: clauses.append("hidden=0")
         params: list[str] = []
+        if include_trashed and trash_minutes is not None:
+            clauses.append("trashed_at IS NOT NULL AND trashed_at >= datetime('now', ?)")
+            params.append(f"-{max(0, float(trash_minutes))} minutes")
         if folder:
             clauses.append("folder=?"); params.append(folder)
         if query:
@@ -559,22 +565,28 @@ class Catalog:
             rows = db.execute(f"SELECT id,relative_path,name,folder,size,modified_ns,status,hidden FROM catalog_assets WHERE {where} ORDER BY modified_ns ASC, relative_path COLLATE NOCASE LIMIT ? OFFSET ?", [*params, page_size, (page - 1) * page_size]).fetchall()
         return [CatalogAsset(**dict(row)) for row in rows], total
 
-    def bulk_update(self, asset_ids: list[str], action: str) -> int:
+    def bulk_update(self, asset_ids: list[str], action: str, trash_minutes: float | None = None) -> int:
         if action not in {"hide", "unhide", "trash", "restore"}:
             raise ValueError("unsupported bulk action")
-        if not asset_ids: return 0
+        if not asset_ids and action != "restore": return 0
         with closing(self._connect()) as db, db:
             placeholders = ",".join("?" for _ in asset_ids)
             if action == "trash":
-                result = db.execute(f"UPDATE catalog_assets SET status='trashed' WHERE id IN ({placeholders}) AND status='available'", asset_ids)
+                result = db.execute(f"UPDATE catalog_assets SET status='trashed', trashed_at=CURRENT_TIMESTAMP WHERE id IN ({placeholders}) AND status='available'", asset_ids)
             elif action == "restore":
-                result = db.execute(f"UPDATE catalog_assets SET status='available' WHERE id IN ({placeholders}) AND status='trashed'", asset_ids)
+                conditions = (f"id IN ({placeholders})" if asset_ids else "1=1") + " AND status='trashed'"
+                params = list(asset_ids)
+                if trash_minutes is not None:
+                    conditions += " AND trashed_at IS NOT NULL AND trashed_at >= datetime('now', ?)"
+                    params.append(f"-{max(0, float(trash_minutes))} minutes")
+                result = db.execute(f"UPDATE catalog_assets SET status='available', trashed_at=NULL WHERE {conditions}", params)
             else:
                 result = db.execute(f"UPDATE catalog_assets SET hidden=? WHERE id IN ({placeholders}) AND status='available'", [1 if action == "hide" else 0, *asset_ids])
         return result.rowcount
 
     def clear_trash(self) -> dict[str, int | list[str]]:
         removed = 0
+        thumbnails_removed = 0
         errors = []
         removed_ids = []
         with closing(self._connect()) as db, db:
@@ -586,14 +598,15 @@ class Catalog:
                     if self.root not in path.parents or any(part.casefold() == "raw" for part in path.relative_to(self.root).parts):
                         raise ValueError("unsafe trash path")
                     path.unlink(missing_ok=True)
-                    if thumbnail:
+                    if thumbnail and thumbnail.is_file():
                         thumbnail.unlink(missing_ok=True)
+                        thumbnails_removed += 1
                     db.execute("DELETE FROM catalog_assets WHERE id=?", (row[0],))
                     removed_ids.append(row[0])
                     removed += 1
                 except (OSError, ValueError) as error:
                     errors.append(f"{row[1]}: {error}")
-        thumbnails_removed = self._remove_orphan_thumbnails()
+        thumbnails_removed += self._remove_orphan_thumbnails()
         feature_database = self.database_path.parent / "features.sqlite"
         if removed_ids and feature_database.exists():
             with closing(sqlite3.connect(feature_database)) as features, features:

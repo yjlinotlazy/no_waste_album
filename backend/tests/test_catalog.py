@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import os
+import sqlite3
 from pathlib import Path
 
 from backend.catalog import Catalog
@@ -153,6 +154,27 @@ class CatalogTests(unittest.TestCase):
             self.assertFalse(image.exists())
             self.assertEqual(catalog.page(show_hidden=True, include_trashed=True)[1], 0)
 
+    def test_trash_timestamp_filters_recent_items_and_restore_clears_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "photo.jpg"
+            image.write_bytes(b"photo")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            asset = catalog.page()[0][0]
+            catalog.bulk_update([asset.id], "trash")
+
+            self.assertEqual(catalog.page(include_trashed=True)[1], 1)
+            self.assertEqual(catalog.page(include_trashed=True, trash_minutes=5)[1], 1)
+            with sqlite3.connect(root / "catalog.sqlite") as db:
+                db.execute("UPDATE catalog_assets SET trashed_at=datetime('now', '-10 minutes') WHERE id=?", (asset.id,))
+                db.commit()
+
+            self.assertEqual(catalog.page(include_trashed=True, trash_minutes=5)[1], 0)
+            self.assertEqual(catalog.bulk_update([asset.id], "restore", trash_minutes=5), 0)
+            self.assertEqual(catalog.bulk_update([asset.id], "restore"), 1)
+            self.assertEqual(catalog.page()[1], 1)
+
     def test_clear_trash_deletes_thumbnail_file_and_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -167,10 +189,11 @@ class CatalogTests(unittest.TestCase):
             catalog.save_thumbnail_record(asset.id, catalog.content_fingerprint(asset.id), f"thumbnails/{asset.id}.jpg", 10, 10, "thumbnail-v1")
             catalog.bulk_update([asset.id], "trash")
 
-            catalog.clear_trash()
+            result = catalog.clear_trash()
 
             self.assertFalse(thumbnail.exists())
             self.assertIsNone(catalog.thumbnail_record(asset.id))
+            self.assertEqual(result["thumbnails_deleted"], 1)
 
     def test_clear_trash_removes_orphan_thumbnail_files(self):
         with tempfile.TemporaryDirectory() as tmp:

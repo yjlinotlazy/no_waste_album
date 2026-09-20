@@ -27,15 +27,23 @@ The model must not silently delete or hide images. It produces scores and review
 The primary positive set is:
 
 ```text
-tag = 高质量 AND tag != 商业
+tag = 高质量 OR tag = 故事
 ```
 
-These are treated as the user's hand-picked examples of personal-album quality.
+Both tags are explicit positive labels for the personal-album recommendation target. `高质量` means the image meets the user's quality bar; `故事` means the image may not be especially strong aesthetically, but contains enough narrative value to belong in an album or memory sequence. They should not be collapsed into the technical-quality score.
+
+`商业` is a context tag, not a negative label. A photo may have both `高质量` and `商业`; it remains positive, while the training record preserves the commercial context.
+
+For the personal-photo target, non-commercial examples are the primary set:
+
+```text
+(tag = 高质量 OR tag = 故事) AND tag != 商业
+```
 
 The initial non-commercial set may be too small to train a useful first model. Therefore, the first bootstrap run may also sample a limited number of:
 
 ```text
-tag = 高质量 AND tag = 商业
+(tag = 高质量 OR tag = 故事) AND tag = 商业
 ```
 
 These are **auxiliary positives**, not equivalent labels. They should have a lower training weight, remain marked with their `商业` context feature, and be sampled in a reproducible, stratified way across folders and visual conditions. The exact sample size should be configurable; a reasonable initial cap is the smaller of 50 images or 20% of the eligible commercial set.
@@ -92,12 +100,12 @@ Extract features for every in-scope image, subject to the `raw/` exclusion. This
 
 #### Bootstrap training set
 
-- include all available primary positives (`高质量` and not `商业`), even if there are only two;
+- include all available primary positives (`高质量` or `故事`), even if there are only two;
 - sample auxiliary commercial positives with a fixed seed and stratification by source folder, capture period, and visual cluster;
 - start with at most 30 auxiliary commercial images or 10% of the eligible commercial set, whichever is smaller;
 - include all explicit negative-sample copies unless they are marked inactive;
 - never convert the remaining unlabeled pool into negatives;
-- attach a label source and training weight to every example so commercial auxiliary positives can be down-weighted.
+- attach a label source and training weight to every example. `故事` and non-commercial `高质量` are primary positives; commercial examples may receive a lower bootstrap weight.
 
 With only two primary positives and no meaningful explicit negatives, do not report a normal classifier metric or present the result as a reliable model. Use a bootstrap prototype/similarity ranking until more feedback exists.
 
@@ -110,7 +118,7 @@ Build a review batch from the unlabeled in-scope pool using a mixture of:
 - uncertain or boundary cases;
 - a small random exploration sample to avoid tunnel vision.
 
-The first review batch should be deliberately small, for example 20–30 images, and should not be dominated by one year folder or one visual cluster. User actions on this batch create real labels: applying `高质量` creates a positive, while **wrong prediction** creates a definitive negative copy.
+The first review batch should be deliberately small, for example 20–30 images, and should not be dominated by one year folder or one visual cluster. User actions on this batch create real labels: applying `高质量` or `故事` creates a positive, while **wrong prediction** creates a definitive negative copy.
 
 To avoid burst sequences without expensive perceptual deduplication, candidate review sampling should apply a configurable minimum time distance within the same folder and capture session. Use EXIF capture time when available, with filesystem time as a fallback. Explicitly labeled examples are never discarded by this thinning rule.
 
@@ -211,15 +219,36 @@ Runs the selected active model over a chosen folder or library scope. It stores 
 - score;
 - explanation/features;
 - current tags;
-- **apply `高质量`**;
+- **apply `高质量` or `故事`**;
 - **wrong prediction**;
 - pagination and filtering by score.
 
-Applying a tag is a user action and creates/updates a training example. A prediction alone does not become a label.
+Applying either positive tag is a user action and creates/updates a training example. A prediction alone does not become a label.
 
 #### Technical quality detection
 
 Remains separate and uses the existing heuristic pipeline. Its results should not be mixed with personal-album model results.
+
+### 6.3 Apple Photos / Memories reference
+
+Apple does not publish the complete Photos Memories selection, sequencing, soundtrack, or slideshow model, and its model weights are not available. We should not treat Apple Memories as a directly reproducible model.
+
+Apple does expose a useful related signal through Vision's `CalculateImageAestheticsScoresRequest`. Its result includes an overall aesthetics score and `isUtility`. Apple defines `isUtility` as indicating that an image may not have poor technical quality, but may lack memorable or exciting content. This is directly relevant to the distinction between technical quality and album/memory value:
+
+- aesthetics and technical-quality signals measure how well the image is made;
+- an `isUtility`-like signal measures whether the image has enough memorable value;
+- the user's `故事` tag provides the stronger, personalized positive label for narrative value.
+
+Apple publicly states that Photos uses on-device scene classification, people and pets identification, photo quality analysis, audio classification, photo editing/sharing behavior, locations, and important dates to support features including Memories. Apple has also described research using iconic scenes to influence key-photo selection for Memories. These are useful design references, not accessible implementations of the full slideshow system.
+
+Relevant references:
+
+- [CalculateImageAestheticsScoresRequest](https://developer.apple.com/documentation/vision/calculateimageaestheticsscoresrequest)
+- [ImageAestheticsScoresObservation.isUtility](https://developer.apple.com/documentation/vision/imageaestheticsscoresobservation/isutility)
+- [Apple Photos & Privacy](https://www.apple.com/legal/privacy/data/en/photos/)
+- [Learning Iconic Scenes with Differential Privacy](https://machinelearning.apple.com/research/scenes-differential-privacy)
+
+Platform constraint: Vision is an Apple-platform framework. This Linux-hosted web app cannot call it directly. If needed later, it could be implemented as an optional macOS helper pipeline that returns cached scores to the catalog. Until then, the local model should approximate the same decomposition using feature generation, the `故事` label, user behavior, temporal/stack structure, people/scenes, and technical-quality signals.
 
 ## 7. Evaluation protocol
 
@@ -248,7 +277,7 @@ The result page should make feedback cheaper than browsing manually:
 
 1. Run evaluation for a folder or the whole library.
 2. Review predictions in score order.
-3. Apply `高质量` to genuine positives.
+3. Apply `高质量` or `故事` to genuine positives.
 4. Press **wrong prediction** for definitive negatives.
 5. Retrain a new candidate model.
 6. Compare the candidate against the currently active model.

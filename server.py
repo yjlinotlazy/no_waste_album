@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -47,6 +48,22 @@ class Library:
         self.preview_lock = threading.Lock()
         self.scan_state = "pending"
         self.scan_result = None
+        self.thumbnail_queue = queue.Queue()
+        self.thumbnail_queue_thread = threading.Thread(target=self._run_thumbnail_queue, name="thumbnail-job-queue", daemon=True)
+        self.thumbnail_queue_thread.start()
+        for pending in reversed(self.jobs.list(500)):
+            if pending["type"] == "thumbnail_generation" and pending["state"] == "queued":
+                self.thumbnail_queue.put(pending)
+
+    def _run_thumbnail_queue(self):
+        while True:
+            job = self.thumbnail_queue.get()
+            try:
+                current = self.jobs.get(job["id"])
+                if current and current["state"] == "queued":
+                    Worker(self.jobs, self.catalog).run_job(current)
+            finally:
+                self.thumbnail_queue.task_done()
 
     def _migrate_legacy_recipes(self):
         legacy_path = self.data_dir / "recipes.json"
@@ -92,6 +109,9 @@ class Library:
         return job
 
     def start_job(self, job):
+        if job["type"] == "thumbnail_generation":
+            self.thumbnail_queue.put(job)
+            return
         def run():
             Worker(self.jobs, self.catalog).run_job(job)
         threading.Thread(target=run, name=f"job-{job['id']}", daemon=True).start()
@@ -108,8 +128,8 @@ class Library:
         assets, total = self.catalog.page(folder, query, page, page_size, show_hidden, tag=tag)
         return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
 
-    def trash_page(self, page, page_size):
-        assets, total = self.catalog.page(folder="", page=page, page_size=page_size, include_trashed=True)
+    def trash_page(self, page, page_size, minutes=None):
+        assets, total = self.catalog.page(folder="", page=page, page_size=page_size, include_trashed=True, trash_minutes=minutes)
         return [{"id": a.id, "name": a.name, "path": a.relative_path, "folder": a.folder, "size": a.size, "modified": a.modified_ns / 1_000_000_000, "url": "/media/" + a.relative_path, "thumbnail_url": self.thumbnail_url(a.id), "hidden": bool(a.hidden), "tags": self.catalog.tags_for_asset(a.id), "recipes": self.catalog.variants(a.id)} for a in assets], total
 
     def asset_by_id(self, asset_id):
@@ -335,8 +355,13 @@ class Handler(BaseHTTPRequestHandler):
             page = max(1, int(query.get("page", ["1"])[0]))
             requested_page_size = int(query.get("page_size", ["5"])[0])
             page_size = requested_page_size if requested_page_size in {5, 10, 20, 50} else 5
-            assets, total = self.library.trash_page(page, page_size)
-            return self.send_json({"root": str(self.library.root), "assets": assets, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
+            try:
+                raw_minutes = query.get("minutes", [""])[0].strip()
+                minutes = max(0, float(raw_minutes)) if raw_minutes else None
+            except ValueError:
+                minutes = None
+            assets, total = self.library.trash_page(page, page_size, minutes)
+            return self.send_json({"root": str(self.library.root), "assets": assets, "page": page, "page_size": page_size, "minutes": minutes, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
         if parsed.path == "/api/catalog/status":
             return self.send_json({"state": self.library.scan_state, "result": self.library.scan_result})
         if parsed.path == "/api/library":
@@ -481,7 +506,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self.operator_only(): return
             payload = self.body_json()
             try:
-                count = self.library.catalog.bulk_update(payload.get("asset_ids", []), payload.get("action", ""))
+                restore_minutes = payload.get("restore_minutes")
+                if restore_minutes is not None:
+                    restore_minutes = max(0, float(restore_minutes))
+                count = self.library.catalog.bulk_update(payload.get("asset_ids", []), payload.get("action", ""), restore_minutes)
             except ValueError as error:
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"updated": count})
