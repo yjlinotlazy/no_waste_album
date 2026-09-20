@@ -145,7 +145,7 @@ class Library:
     def asset_by_id(self, asset_id):
         asset = self.catalog.get(asset_id)
         if not asset: return None
-        return {"id": asset.id, "name": asset.name, "path": asset.relative_path, "folder": asset.folder, "size": asset.size, "modified": asset.modified_ns / 1_000_000_000, "url": "/media/" + asset.relative_path, "thumbnail_url": self.thumbnail_url(asset.id), "hidden": bool(asset.hidden), "tags": self.catalog.tags_for_asset(asset.id), "recipes": self.catalog.variants(asset.id)}
+        return {"id": asset.id, "name": asset.name, "path": asset.relative_path, "folder": asset.folder, "size": asset.size, "modified": asset.modified_ns / 1_000_000_000, "url": "/media/" + asset.relative_path, "thumbnail_url": self.thumbnail_url(asset.id), "hidden": bool(asset.hidden), "tags": self.catalog.tags_for_asset(asset.id), "recipes": self.catalog.variants(asset.id), "current_variant_id": self.catalog.current_variant_id(asset.id)}
 
     def thumbnail_path(self, asset_id):
         path = self.catalog.thumbnail_path(asset_id)

@@ -1,8 +1,15 @@
 # Implementation Milestones
 
-The immediate objective is to establish a trustworthy local application foundation, a fast library catalog, and a usable non-destructive editing layer. We will hold a checkpoint after these three milestones before committing to advanced functionality.
+The original immediate objective was to establish a trustworthy local application foundation, a fast library catalog, and a usable non-destructive editing layer. Those foundations now exist and the project has moved into advanced-job hardening. The feature table below distinguishes implemented slices from future work.
 
-## Active milestones
+## Current checkpoint status
+
+- Milestone 0: substantially implemented — local server, config, SQLite catalog, mode enforcement, logging, jobs, and automated tests.
+- Milestone 1: substantially implemented — recursive cataloging, `raw/` exclusion, folder explorer, pagination, lazy thumbnails, trash, hidden state, and explicit rescans.
+- Milestone 2: substantially implemented — browser-side non-destructive editing, crop, adjustments, white balance, filters, rotation, variants, current-version persistence, and backend rendering/export.
+- Remaining foundation gaps: browser-level regression tests, complete API documentation, and a clean separation between implemented jobs and future ML/search services.
+
+## Completed foundation milestones
 
 ### Milestone 0 — Production foundation
 
@@ -65,6 +72,16 @@ Before starting advanced functionality, review:
 
 The checkpoint is a deliberate decision point, not merely a progress review.
 
+## Implemented advanced-job slices
+
+- Technical quality detection using explainable heuristics for blur, resolution, exposure, and low information.
+- Thumbnail generation with resumable work, cached thumbnails, clean-start mode, and catalog updates.
+- 图片找朋友 stacking using cached thumbnail pHash, adjacent-image time limits, configurable Hamming distance, and stack-result review.
+- Auto Develop pipeline that creates named `auto` versions and supports result review/deletion.
+- Dedicated job pages, queued thumbnail/stack jobs, progress details, stale-running-job reconciliation, and full job history.
+
+These are useful pipeline slices, not the complete semantic ML architecture described in `DESIGN.md`.
+
 ## Deferred advanced functionality
 
 | Area | Planned capability | Depends on | Priority after checkpoint |
@@ -78,7 +95,7 @@ The checkpoint is a deliberate decision point, not merely a progress review.
 | Quality cleanup | Low-quality review, bulk selection, explainable scores | Image analysis, file management | Medium |
 | File management | Trash, restore, explicit Clear Trash, audited permanent deletion | Catalog, domain service | Medium |
 | Collections | Manual collections, accepted cluster organization, collection search | Catalog, domain service | Medium |
-| External integrations | Generic shuttle/adapter layer, Home Companion integration | Stable asset/variant model | Medium |
+| External integrations | Generic shuttle/adapter layer, Kindle Gen 7 integration | Stable asset/variant model | Medium |
 | Advanced editing | RAW development, layered editing, masks, brushes, batch editing, stronger color management | Editing foundation | Later |
 | Automation | Filesystem watchers, scheduled analysis, automatic stale-data refresh | Job system, catalog | Later |
 | Portability | Metadata backup, portable edit recipes, derived-data rebuild tooling | Stable persistence model | Later |

@@ -2,6 +2,8 @@
 
 These diagrams are the visual companion to [`DESIGN.md`](DESIGN.md).
 
+> Status: the diagrams show the target architecture, not the complete current feature set. Implemented today: catalog/database, rendering, job manager, thumbnails, stacking, technical quality detection, Auto Develop, trash/tags, current-version persistence, and Kindle Gen 7 export. Visitor telemetry, semantic search, recommendations, general clustering, and personalized ML training are future modules.
+
 ## 1. System overview
 
 ```mermaid
@@ -19,7 +21,7 @@ flowchart LR
         Telemetry[Visitor telemetry]
         Files[File-management service\ntrash and delete]
         Jobs[Job manager]
-        Adapters[External-app adapters]
+    Adapters[External-app adapters\nKindle Gen 7 first]
     end
 
     API --> Catalog
@@ -74,7 +76,7 @@ flowchart TB
     Clusters --> Search
 ```
 
-The catalog is the fast, basic inventory needed for browsing. The semantic index is derived data and may be absent or stale without breaking the file browser.
+The catalog is the fast, basic inventory needed for browsing. The semantic index is planned derived data and is currently absent; its absence must not break the file browser. Thumbnail generation and image stacking are implemented catalog-adjacent jobs, but are not a semantic search index.
 
 ## 3. Non-destructive editing flow
 

@@ -1,5 +1,7 @@
 # Personal Album Management Studio — Technical Design
 
+> Status: this document describes the target design. The current implementation is a Python modular monolith using `server.py`, SQLite, Pillow, and vanilla browser JavaScript. Catalog browsing, non-destructive editing, thumbnails, stacking, technical quality detection, Auto Develop, trash, tags, current-version persistence, job history, and Kindle Gen 7 export are implemented. Semantic search, visitor telemetry, recommendation ranking, general clustering, and the personalized album-quality model remain planned.
+
 ## 1. Design goals
 
 - Run as a local, single-user web application.
@@ -117,7 +119,7 @@ The API should return stable IDs, explicit status values, timestamps, and model/
 
 ### 4.2 Authorization layer
 
-Authorization should classify API operations as `read`, `operator_mutation`, or `destructive`. 游客模式 may call only permitted read operations. 牛马模式 may call all operations, with destructive actions requiring an additional explicit confirmation at the API/UI workflow level.
+Authorization should classify API operations as `read`, `operator_mutation`, or `destructive`. 游客模式 may call only permitted read operations. 牛马模式 may call all operations. Destructive operations require an explicit operator action, but the current product intentionally does not add confirmation dialogs.
 
 ### 4.3 Asset service
 
@@ -151,7 +153,7 @@ Translates user queries into catalog filters, feature comparisons, and semantic-
 
 ### 4.8 Integration adapter layer
 
-External applications are accessed through adapters with a common handoff interface. The first adapter targets Home Companion. Adapters receive stable asset/variant IDs and can request rendered files and metadata from the backend.
+External applications are accessed through adapters with a common handoff interface. Kindle Gen 7 is the first adapter. Adapters receive stable asset/variant IDs and can request rendered files and metadata from the backend.
 
 ### 4.9 Visitor telemetry service
 
@@ -248,7 +250,7 @@ device GET
   → record a view for the stack + source asset
 ```
 
-The current manual device-send action is an operator-only shortcut. It may send the live unsaved editor recipe and does not change saved variant metadata, but it still counts as a view of the source asset when delivery succeeds. Future device GET handlers should distinguish actual delivery/display from retries or prefetches so transport behavior does not accidentally create extra views.
+The current manual device-send action is an operator-only shortcut. It may send the live unsaved editor recipe and does not change saved variant metadata. It does **not** count as an album view. Future device GET handlers should distinguish actual delivery/display from retries or prefetches so transport behavior does not accidentally create extra views.
 
 ## 7. Processing jobs
 
@@ -367,7 +369,7 @@ Each iteration should deliver a runnable vertical slice:
 5. Search index and metadata/color/visual similarity search.
 6. Duplicate/quality cleanup workflow with trash safety.
 7. ML clustering, reviewable recommendations, and hidden-gem ranking.
-8. Home Companion handoff and broader integration/testing hardening.
+8. Kindle Gen 7 handoff and broader integration/testing hardening.
 
 The exact order can change, but migrations, API versioning, and persisted-data compatibility must be considered at every iteration.
 
@@ -380,7 +382,7 @@ The exact order can change, but migrations, API versioning, and persisted-data c
 - Image-analysis and ML runtime/model choices.
 - Preview and derived-file storage layout.
 - Job event transport: polling, server-sent events, or WebSocket.
-- Home Companion integration protocol.
+- Future device integration protocols beyond Kindle Gen 7.
 - Qualified-view threshold and weighting of impressions versus meaningful views.
 - Telemetry retention period and whether raw visitor events can be compacted after aggregation.
 - Exact deduplication window and treatment of repeated visits in one session.

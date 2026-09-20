@@ -1,5 +1,7 @@
 # Personal Album Quality Model
 
+> Status: planned, not implemented. The current app has technical-quality heuristics, thumbnail generation, 图片找朋友 stacking, Auto Develop, tags, and the shared job infrastructure. It does not yet train or evaluate this personalized album-quality model, generate its training features, or provide the described feedback loop. This document is the target design for that future capability.
+
 ## 1. Purpose
 
 This model answers one product question:

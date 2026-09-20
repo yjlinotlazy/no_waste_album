@@ -1,5 +1,7 @@
 # Personal Album Management Studio — Requirements
 
+> Status: this is the product target, not a list of already-completed features. The current release implements the local catalog, browsing/pagination/lazy thumbnails, editing/variants, tags, hidden/trash workflows, technical quality detection, thumbnail generation, 图片找朋友 stacking, Auto Develop, job monitoring, and Kindle Gen 7 export. Semantic search, visitor-mode album telemetry, recommendation ranking, and personalized ML training are not implemented yet.
+
 ## 1. Product goal
 
 Build a personal, local-first studio for organizing a large image library, creating multiple visual versions of the same image, finding redundant or related images, and surfacing valuable images that are otherwise overlooked.
@@ -129,13 +131,13 @@ The original image remains the source of truth. Editing and organization metadat
 ### 5.8 Interoperability
 
 1. The system shall support sending selected assets, variants, clusters, or search results to external applications.
-2. The first integration target is Home Companion, but the integration boundary shall not hard-code that application.
+2. The first integration target is Kindle Gen 7. The integration boundary shall not hard-code that device.
 3. Handoff shall include stable asset identifiers and, when needed, rendered files plus relevant metadata.
 4. Failed handoffs shall be visible and retryable.
 
 ## 6. Non-functional requirements
 
-- **Safety:** No irreversible operation without explicit user action and confirmation.
+- **Safety:** No irreversible operation without explicit user action. Operator actions intentionally do not require extra confirmation dialogs; Clear Trash remains the explicit permanent-deletion action.
 - **Data integrity:** Source files must remain untouched by indexing, editing, analysis, and preview rendering.
 - **Privacy:** Image analysis and indexing should run locally by default; any external processing must be opt-in and disclosed.
 - **Responsiveness:** Browsing, search, and existing cached previews should remain usable while indexing or analysis runs in the background.
@@ -215,7 +217,7 @@ The MVP should include:
 7. Search by metadata, color, and basic visual similarity.
 8. Manual collections plus one automatic clustering strategy.
 9. Basic view statistics and hidden-gem ranking.
-10. A generic export/handoff mechanism, with Home Companion as the first adapter.
+10. A generic export/handoff mechanism, with Kindle Gen 7 as the first adapter.
 11. A locally served single-user web interface with 牛马模式 and 游客模式.
 12. Backend-enforced browse-only restrictions for 游客模式.
 
@@ -251,6 +253,6 @@ The MVP should include:
 - Supported image formats and whether RAW files are in scope for the first release.
 - Whether metadata lives in a sidecar database, sidecar files, or both.
 - Exact definition and weighting of “hidden gem.”
-- Which Home Companion handoff protocol/API is available.
+- Which future device handoff protocols/APIs are available beyond Kindle Gen 7.
 - Whether variants can be shared as portable edit recipes across installations.
 - Retention policy for view statistics and derived image-analysis data.
