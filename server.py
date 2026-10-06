@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from backend.catalog import Catalog
+from backend.depth import extract as extract_depth, extract_portrait_matte
 from backend.domain import MetadataService
 from backend.rendering import Renderer
 from backend.jobs import JobStore
@@ -40,9 +41,12 @@ class Library:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.catalog = Catalog(self.root, self.data_dir / "catalog.sqlite")
+        self.catalog.sync_variant_tags()
         self.metadata = MetadataService(self.catalog)
         self._migrate_legacy_recipes()
-        self.renderer = Renderer(self.root)
+        self.lut_dir = self.data_dir / "luts"
+        self.lut_dir.mkdir(parents=True, exist_ok=True)
+        self.renderer = Renderer(self.root, self.lut_dir)
         self.jobs = JobStore(self.data_dir / "jobs.sqlite")
         self.preview_dir = self.data_dir / "previews"
         self.preview_lock = threading.Lock()
@@ -154,6 +158,24 @@ class Library:
     def thumbnail_url(self, asset_id):
         return f"/thumbnails/{asset_id}.jpg" if self.thumbnail_path(asset_id) else None
 
+    def depth_path(self, asset_id):
+        asset = self.catalog.get(asset_id)
+        if not asset or asset.status != "available":
+            return None
+        source = (self.root / asset.relative_path).resolve()
+        if self.root not in source.parents or source.suffix.casefold() not in {".heic", ".heif"}:
+            return None
+        return extract_depth(source, self.data_dir / "depths" / f"{asset_id}.jpg")
+
+    def portrait_matte_path(self, asset_id):
+        asset = self.catalog.get(asset_id)
+        if not asset or asset.status != "available":
+            return None
+        source = (self.root / asset.relative_path).resolve()
+        if self.root not in source.parents or source.suffix.casefold() not in {".heic", ".heif"}:
+            return None
+        return extract_portrait_matte(source, self.data_dir / "portrait-mattes" / f"{asset_id}.jpg")
+
     def source_path(self, asset_id):
         asset = self.catalog.get(asset_id)
         if not asset or asset.status != "available": return None
@@ -186,6 +208,39 @@ class Library:
             except (OSError, subprocess.SubprocessError):
                 temporary.unlink(missing_ok=True)
                 return None
+        return target
+
+    def render_preview(self, asset_id, recipe, max_size=1800):
+        """Render a recipe on the server and return a cached JPEG preview."""
+        asset = self.catalog.get(asset_id)
+        if not asset or asset.status != "available":
+            raise FileNotFoundError("Asset not found or unavailable")
+        source = (self.root / asset.relative_path).resolve()
+        if self.root not in source.parents or any(part.casefold() == "raw" for part in source.relative_to(self.root).parts):
+            raise ValueError("source is outside the catalog")
+        stat = source.stat()
+        recipe_key = json.dumps(recipe or {}, sort_keys=True, separators=(",", ":"))
+        cache_key = hashlib.sha256(f"{asset.id}:{stat.st_size}:{stat.st_mtime_ns}:{max_size}:{recipe_key}".encode("utf-8")).hexdigest()
+        target = self.preview_dir / f"rendered-{cache_key}.jpg"
+        if target.is_file():
+            return target
+        with self.preview_lock:
+            if target.is_file():
+                return target
+            self.preview_dir.mkdir(parents=True, exist_ok=True)
+            full_target = self.preview_dir / f".{cache_key}.full.jpg"
+            temporary = self.preview_dir / f".{cache_key}.tmp.jpg"
+            try:
+                self.renderer.render(asset.relative_path, recipe or {}, full_target, max_size=max_size)
+                from PIL import Image
+                with Image.open(full_target) as image:
+                    image = image.convert("RGB")
+                    image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    image.save(temporary, format="JPEG", quality=92, optimize=True)
+                temporary.replace(target)
+            finally:
+                full_target.unlink(missing_ok=True)
+                temporary.unlink(missing_ok=True)
         return target
 
 
@@ -281,8 +336,9 @@ class Handler(BaseHTTPRequestHandler):
             super().handle_one_request()
         finally:
             self.wfile = original_wfile
+            headers = getattr(self, "headers", None)
             try:
-                request_size = int(self.headers.get("Content-Length", "0") or 0)
+                request_size = int(headers.get("Content-Length", "0") or 0) if headers else 0
             except (TypeError, ValueError):
                 request_size = 0
             self.request_logger.record(
@@ -363,6 +419,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"root": str(self.library.root), "folders": self.library.folders(), "counts": self.library.catalog.folder_counts(), "stack_counts": self.library.catalog.folder_stack_counts()})
         if parsed.path == "/api/tags":
             return self.send_json({"tags": self.library.catalog.tags()})
+        if parsed.path == "/api/luts":
+            from backend.luts import display_name
+            luts = [{"id": path.name, "name": display_name(path)} for path in sorted(self.library.lut_dir.glob("*.cube"))]
+            return self.send_json({"luts": luts})
         asset_match = re.match(r"^/api/assets/([^/]+)$", parsed.path)
         if asset_match:
             asset = self.library.asset_by_id(asset_match.group(1))
@@ -407,6 +467,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.end_headers()
             return self.wfile.write(data)
+        preview_match = re.match(r"^/api/previews/([a-f0-9]+)\.jpg$", parsed.path)
+        if preview_match:
+            path = self.library.preview_dir / f"rendered-{preview_match.group(1)}.jpg"
+            if not path.is_file():
+                return self.send_json({"error": "Preview not found"}, HTTPStatus.NOT_FOUND)
+            data = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return self.wfile.write(data)
+        depth_match = re.match(r"^/api/assets/([^/]+)/depth$", parsed.path)
+        if depth_match:
+            path = self.library.depth_path(depth_match.group(1))
+            if not path:
+                return self.send_json({"error": "Depth map not available"}, HTTPStatus.NOT_FOUND)
+            data = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return self.wfile.write(data)
+        matte_match = re.match(r"^/api/assets/([^/]+)/portrait-matte$", parsed.path)
+        if matte_match:
+            path = self.library.portrait_matte_path(matte_match.group(1))
+            if not path:
+                return self.send_json({"error": "Portrait matte not available"}, HTTPStatus.NOT_FOUND)
+            data = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.end_headers()
+            return self.wfile.write(data)
         if parsed.path.startswith("/media/"):
             relative = unquote(parsed.path[len("/media/"):])
             path = self.library.media_path(relative)
@@ -442,6 +538,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/luts":
+            if not self.operator_only(): return
+            payload = self.body_json()
+            filename = Path(str(payload.get("filename", ""))).name
+            if Path(filename).suffix.casefold() != ".cube":
+                return self.send_json({"error": "Only .cube LUT files are supported"}, HTTPStatus.BAD_REQUEST)
+            content = payload.get("content", "")
+            if not isinstance(content, str) or len(content) > 10_000_000:
+                return self.send_json({"error": "Invalid or oversized LUT"}, HTTPStatus.BAD_REQUEST)
+            import uuid
+            lut_id = f"{uuid.uuid4().hex}.cube"
+            target = self.library.lut_dir / lut_id
+            try:
+                target.write_text(content, encoding="utf-8")
+                from backend.luts import load_cube
+                load_cube(target)
+            except (OSError, ValueError) as error:
+                target.unlink(missing_ok=True)
+                return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            from backend.luts import display_name
+            return self.send_json({"id": lut_id, "name": display_name(target)}, HTTPStatus.CREATED)
+        if parsed.path == "/api/preview":
+            payload = self.body_json()
+            asset_id = str(payload.get("asset_id", ""))
+            try:
+                max_size = max(640, min(2400, int(payload.get("max_size", 1800))))
+                path = self.library.render_preview(asset_id, payload.get("recipe") or {}, max_size)
+                return self.send_json({"url": f"/api/previews/{path.stem.removeprefix('rendered-')}.jpg"})
+            except (FileNotFoundError, OSError, ValueError) as error:
+                return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if parsed.path == "/api/settings":
             if not self.operator_only(): return
             payload = self.body_json()

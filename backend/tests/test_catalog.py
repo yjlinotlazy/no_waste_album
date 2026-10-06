@@ -9,6 +9,44 @@ from backend.analysis import FeatureStore
 
 
 class CatalogTests(unittest.TestCase):
+    def test_heic_replaces_jpg_with_matching_stem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jpg = root / "Photo.JPG"
+            heic = root / "photo.HEIC"
+            jpg.write_bytes(b"jpg")
+            heic.write_bytes(b"heic")
+            catalog = Catalog(root, root / "catalog.sqlite")
+
+            result = catalog.scan("incremental")
+            assets, total = catalog.page(page_size=50)
+
+            self.assertEqual(result["seen"], 1)
+            self.assertEqual(total, 1)
+            self.assertEqual(assets[0].relative_path, "photo.HEIC")
+
+    def test_incremental_scan_merges_existing_jpg_when_heic_is_added(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jpg = root / "photo.jpg"
+            jpg.write_bytes(b"jpg")
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("incremental")
+            original = catalog.page()[0][0]
+            catalog.set_tag(original.id, "favorite", "manual")
+            catalog.add_variant(original.id, {"id": "variant-1", "filter": "none"})
+            (root / "photo.HEIC").write_bytes(b"heic")
+
+            result = catalog.scan("incremental")
+            assets, total = catalog.page(page_size=50)
+
+            self.assertEqual(result["missing"], 0)
+            self.assertEqual(total, 1)
+            self.assertEqual(assets[0].id, original.id)
+            self.assertEqual(assets[0].relative_path, "photo.HEIC")
+            self.assertEqual(catalog.tags_for_asset(original.id), ["favorite"])
+            self.assertEqual(catalog.variants(original.id)[0]["id"], "variant-1")
+
     def test_raw_trees_are_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,6 +162,8 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(catalog.bulk_update([asset.id], "hide"), 1)
             self.assertEqual(catalog.page()[1], 0)
             self.assertEqual(catalog.page(show_hidden=True)[1], 1)
+            self.assertEqual(catalog.bulk_update([asset.id], "unhide"), 1)
+            self.assertEqual(catalog.page()[1], 1)
             self.assertEqual(catalog.bulk_update([asset.id], "trash"), 1)
             self.assertEqual(catalog.page(show_hidden=True)[1], 0)
 

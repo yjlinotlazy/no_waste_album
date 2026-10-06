@@ -3,11 +3,56 @@ import unittest
 from pathlib import Path
 
 from PIL import Image
+import numpy as np
 
 from backend.rendering import Renderer
+from backend.luts import apply_cube, display_name, load_cube
 
 
 class RenderingTests(unittest.TestCase):
+    def test_cube_display_name_uses_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "550e8400-e29b-41d4-a716-446655440000.cube"
+            lut_path.write_text('TITLE "Soft Portrait"\n', encoding="utf-8")
+            self.assertEqual(display_name(lut_path), "Soft Portrait")
+
+    def test_cube_display_name_uses_comment_title(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "550e8400-e29b-41d4-a716-446655440000.cube"
+            lut_path.write_text("#title:FLog2C_to_Velvia\nLUT_3D_SIZE 2\n", encoding="utf-8")
+            self.assertEqual(display_name(lut_path), "FLog2C_to_Velvia")
+
+    def test_cube_parser_ignores_title_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "portrait.cube"
+            lut_path.write_text('TITLE "Soft Portrait"\nLUT_3D_SIZE 2\n' + "\n".join("0 0 0" for _ in range(8)), encoding="utf-8")
+            self.assertEqual(load_cube(lut_path)["size"], 2)
+
+    def test_cube_uses_red_as_fastest_varying_axis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "axis.cube"
+            rows = []
+            for blue in (0, 1):
+                for green in (0, 1):
+                    for red in (0, 1):
+                        rows.append(f"{red} {green} {blue}")
+            lut_path.write_text("LUT_3D_SIZE 2\n" + "\n".join(rows), encoding="utf-8")
+            result = apply_cube(np.asarray([[[255, 0, 0]]], dtype=np.uint8), load_cube(lut_path))
+            self.assertTrue(np.allclose(result[0, 0], [1, 0, 0]))
+
+    def test_cube_lut_parser_and_application(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "invert.cube"
+            rows = []
+            for blue in (0, 1):
+                for green in (0, 1):
+                    for red in (0, 1):
+                        rows.append(f"{1-red} {1-green} {1-blue}")
+            lut_path.write_text("LUT_3D_SIZE 2\n" + "\n".join(rows), encoding="utf-8")
+            lut = load_cube(lut_path)
+            result = apply_cube(np.asarray([[[64, 128, 192]]], dtype=np.uint8), lut)
+            self.assertLess(result[0, 0, 0], .8)
+            self.assertGreater(result[0, 0, 2], .1)
     def test_render_preserves_source_and_applies_crop(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -19,6 +64,15 @@ class RenderingTests(unittest.TestCase):
             with Image.open(source) as original, Image.open(destination) as edited:
                 self.assertEqual(original.size, (100, 80))
                 self.assertEqual(edited.size, (50, 40))
+
+    def test_preview_render_downscales_before_processing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Image.new("RGB", (1600, 1000), (100, 120, 140)).save(root / "photo.jpg")
+            destination = root / "preview.jpg"
+            Renderer(root).render("photo.jpg", {}, destination, max_size=400)
+            with Image.open(destination) as preview:
+                self.assertEqual(preview.size, (400, 250))
 
     def test_raw_source_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -40,6 +94,16 @@ class RenderingTests(unittest.TestCase):
             Renderer(root).render("oriented.jpg", {}, destination)
             with Image.open(destination) as edited:
                 self.assertEqual(edited.size, (40, 60))
+
+    def test_rotation_crops_rotated_corners(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            Image.new("RGB", (100, 80), (255, 255, 255)).save(root / "photo.jpg")
+            destination = root / "rotated.png"
+            Renderer(root).render("photo.jpg", {"rotate": 10}, destination)
+            with Image.open(destination) as edited:
+                self.assertEqual(edited.size, (90, 65))
+                self.assertTrue(all(min(edited.getpixel(point)) > 200 for point in ((0, 0), (89, 0), (0, 64), (89, 64))))
 
     def test_kindle_filter_writes_16_level_grayscale_png(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,11 +14,15 @@ class MetadataService:
             raise KeyError("asset not found")
         normalized = normalize(recipe)
         normalized["id"] = uuid.uuid4().hex
-        return self.catalog.add_variant(asset_id, normalized)
+        result = self.catalog.add_variant(asset_id, normalized)
+        self.catalog.set_tag(asset_id, "with_variants", "system_variants")
+        return result
 
     def delete_variant(self, asset_id: str, variant_id: str) -> None:
         if not self.catalog.delete_variant(asset_id, variant_id):
             raise KeyError("variant not found")
+        if not self.catalog.variants(asset_id):
+            self.catalog.remove_tag(asset_id, "with_variants", "system_variants")
 
     def rename_variant(self, asset_id: str, variant_id: str, name: str) -> dict:
         if not self.catalog.get(asset_id):

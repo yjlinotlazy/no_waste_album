@@ -17,8 +17,15 @@ class RecipeTests(unittest.TestCase):
             normalize({"filter": "invalid"})
 
     def test_portrait_filters_are_supported(self):
-        for selected in ("portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "kindle_16gray", "shadow_recovery", "night_lift", "backlight", "highlight_recovery", "local_clahe", "auto_develop"):
+        for selected in ("portrait_soft", "portrait_warm", "portrait_clear", "portrait_mono", "portrait_cinematic", "portrait_depth", "kindle_16gray", "shadow_recovery", "night_lift", "backlight", "highlight_recovery", "local_clahe", "auto_develop"):
             self.assertEqual(normalize({"filter": selected})["filter"], selected)
+
+    def test_new_filter_selection_overrides_stale_disabled_filter_node(self):
+        recipe = normalize({
+            "filter": "autumn",
+            "nodes": [{"id": "filter", "type": "filter", "name": "旧滤镜", "enabled": False}],
+        })
+        self.assertEqual(recipe["filter"], "autumn")
 
 
 if __name__ == "__main__":

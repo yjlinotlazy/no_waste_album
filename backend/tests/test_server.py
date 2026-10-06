@@ -2,11 +2,23 @@ import io
 import unittest
 from pathlib import Path
 from http import HTTPStatus
+from unittest.mock import patch
 
 from server import Handler
 
 
 class ServerRouteTests(unittest.TestCase):
+    def test_request_telemetry_handles_requests_without_headers(self):
+        handler = object.__new__(Handler)
+        handler.wfile = io.BytesIO()
+        handler.request_logger = unittest.mock.Mock()
+
+        with patch.object(Handler.__mro__[1], "handle_one_request", return_value=None):
+            Handler.handle_one_request(handler)
+
+        handler.request_logger.record.assert_called_once()
+        self.assertEqual(handler.request_logger.record.call_args.kwargs["request_size"], 0)
+
     def test_spa_routes_fall_back_to_index(self):
         class TestHandler:
             web_root = Path(__file__).parents[2] / "web"

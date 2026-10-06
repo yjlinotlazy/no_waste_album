@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .recipes import normalize
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".heic", ".heif"}
 
 
@@ -215,6 +217,76 @@ class Catalog:
                 digest.update(block)
         return digest.hexdigest()
 
+    @staticmethod
+    def _asset_key(relative: str) -> tuple[str, str]:
+        path = Path(relative)
+        return path.parent.as_posix().casefold(), path.stem.casefold()
+
+    def _merge_asset_rows(self, db: sqlite3.Connection, keep_id: str, drop_id: str) -> None:
+        if keep_id == drop_id:
+            return
+        keep = db.execute("SELECT current_variant_id FROM catalog_assets WHERE id=?", (keep_id,)).fetchone()
+        drop = db.execute("SELECT current_variant_id FROM catalog_assets WHERE id=?", (drop_id,)).fetchone()
+        if keep and drop and not keep[0] and drop[0]:
+            db.execute("UPDATE catalog_assets SET current_variant_id=? WHERE id=?", (drop[0], keep_id))
+        for table, columns, select_columns in (
+            ("variants", "id,asset_id,recipe_json,created_at", "id,?,recipe_json,created_at"),
+            ("quality_assessments", "asset_id,job_id,detector_version,modified_ns,badness_score,threshold,is_bad,details_json,created_at", "?,job_id,detector_version,modified_ns,badness_score,threshold,is_bad,details_json,created_at"),
+            ("asset_tags", "asset_id,tag_name,source,created_at", "?,tag_name,source,created_at"),
+        ):
+            db.execute(f"INSERT OR IGNORE INTO {table} ({columns}) SELECT {select_columns} FROM {table} WHERE asset_id=?", (keep_id, drop_id))
+            db.execute(f"DELETE FROM {table} WHERE asset_id=?", (drop_id,))
+        db.execute("INSERT OR IGNORE INTO stack_members (stack_id,asset_id,ordinal) SELECT stack_id,?,ordinal FROM stack_members WHERE asset_id=?", (keep_id, drop_id))
+        db.execute("DELETE FROM stack_members WHERE asset_id=?", (drop_id,))
+        db.execute("UPDATE stacks SET representative_asset_id=? WHERE representative_asset_id=?", (keep_id, drop_id))
+        db.execute("DELETE FROM thumbnails WHERE asset_id IN (?,?)", (keep_id, drop_id))
+        db.execute("DELETE FROM stack_phashes WHERE asset_id IN (?,?)", (keep_id, drop_id))
+        db.execute("DELETE FROM catalog_assets WHERE id=?", (drop_id,))
+
+    def _reconcile_heic_migrations(self, db: sqlite3.Connection, entries: list[tuple[Path, str]]) -> set[str]:
+        invalidated = set()
+        heic_entries = [(path, relative) for path, relative in entries if path.suffix.casefold() in {".heic", ".heif"}]
+        jpg_by_key: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in db.execute("SELECT * FROM catalog_assets WHERE status != 'trashed'"):
+            if row["relative_path"].lower().endswith((".jpg", ".jpeg")):
+                jpg_by_key.setdefault(self._asset_key(row["relative_path"]), []).append(row)
+        for path, relative in heic_entries:
+            key = self._asset_key(relative)
+            candidates = jpg_by_key.get(key, [])
+            if not candidates:
+                continue
+            stat = path.stat()
+            canonical = next((row for row in candidates if row["status"] == "available"), candidates[0])
+            existing_heic = db.execute("SELECT id FROM catalog_assets WHERE relative_path=?", (relative,)).fetchone()
+            if existing_heic and existing_heic[0] != canonical["id"]:
+                self._merge_asset_rows(db, canonical["id"], existing_heic[0])
+                invalidated.add(existing_heic[0])
+            for duplicate in candidates:
+                if duplicate["id"] != canonical["id"]:
+                    self._merge_asset_rows(db, canonical["id"], duplicate["id"])
+                    invalidated.add(duplicate["id"])
+            db.execute(
+                """UPDATE catalog_assets
+                   SET relative_path=?, name=?, folder=?, size=?, modified_ns=?,
+                       content_fingerprint=?, status=?, last_seen_at=CURRENT_TIMESTAMP
+                   WHERE id=?""",
+                (relative, path.name, path.parent.relative_to(self.root).as_posix() if path.parent != self.root else "", stat.st_size, stat.st_mtime_ns, self._fingerprint(path), "available" if canonical["status"] == "missing" else canonical["status"], canonical["id"]),
+            )
+            invalidated.add(canonical["id"])
+        return invalidated
+
+    def _invalidate_features(self, asset_ids: set[str]) -> None:
+        if not asset_ids:
+            return
+        feature_database = self.database_path.parent / "features.sqlite"
+        if not feature_database.exists():
+            return
+        placeholders = ",".join("?" for _ in asset_ids)
+        with closing(sqlite3.connect(feature_database)) as db, db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_features'").fetchone():
+                return
+            db.execute(f"DELETE FROM image_features WHERE asset_id IN ({placeholders})", tuple(asset_ids))
+
     def _iter_images(self) -> Iterable[tuple[Path, str]]:
         data_dir = self.database_path.parent.resolve()
 
@@ -223,6 +295,12 @@ class Catalog:
                 entries = sorted(os.scandir(folder), key=lambda entry: entry.name.casefold())
             except OSError:
                 return
+            heic_stems = {
+                Path(entry.name).stem.casefold()
+                for entry in entries
+                if entry.is_file(follow_symlinks=False)
+                and Path(entry.name).suffix.casefold() in {".heic", ".heif"}
+            }
             for entry in entries:
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name.casefold() == "raw":
@@ -232,6 +310,8 @@ class Catalog:
                     yield from walk(Path(entry.path))
                 elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.casefold() in IMAGE_EXTENSIONS:
                     path = Path(entry.path)
+                    if path.suffix.casefold() in {".jpg", ".jpeg"} and path.stem.casefold() in heic_stems:
+                        continue
                     yield path, path.relative_to(self.root).as_posix()
         yield from walk(self.root)
 
@@ -246,6 +326,24 @@ class Catalog:
             total_images = len(entries)
             folders_total = len({path.parent.relative_to(self.root).as_posix() if path.parent != self.root else "" for path, _ in entries})
             folders_seen = set()
+            invalidated_features = self._reconcile_heic_migrations(db, entries)
+            preferred_heic_stems = {
+                (Path(relative).parent.as_posix().casefold(), Path(relative).stem.casefold())
+                for path, relative in entries
+                if path.suffix.casefold() in {".heic", ".heif"}
+            }
+            if preferred_heic_stems:
+                shadowed = []
+                for row in db.execute("SELECT relative_path FROM catalog_assets WHERE status='available'"):
+                    relative = Path(row[0])
+                    if relative.suffix.casefold() not in {".jpg", ".jpeg"}:
+                        continue
+                    key = self._asset_key(row[0])
+                    if key in preferred_heic_stems:
+                        shadowed.append((row[0],))
+                if shadowed:
+                    db.executemany("UPDATE catalog_assets SET status='missing' WHERE relative_path=?", shadowed)
+                    counts["missing"] += len(shadowed)
             for index, (path, relative) in enumerate(entries, 1):
                 try:
                     stat = path.stat()
@@ -276,6 +374,7 @@ class Catalog:
                     db.executemany("UPDATE catalog_assets SET status='missing' WHERE relative_path=?", ((path,) for path in missing))
                     counts["missing"] = len(missing)
             db.execute("UPDATE catalog_scans SET finished_at=CURRENT_TIMESTAMP, files_seen=?, files_added=?, files_changed=?, files_missing=?, status='completed' WHERE id=?", (counts["seen"], counts["added"], counts["changed"], counts["missing"], scan_id))
+        self._invalidate_features(invalidated_features)
         return {"kind": kind, **counts}
 
     def folders(self) -> list[str]:
@@ -437,6 +536,19 @@ class Catalog:
             else:
                 db.execute("DELETE FROM asset_tags WHERE asset_id=? AND tag_name=? AND source=?", (asset_id, tag_name, source))
 
+    def sync_variant_tags(self) -> None:
+        """Maintain the hidden system tag for assets that have variants."""
+        source = "system_variants"
+        with closing(self._connect()) as db, db:
+            asset_ids = [row[0] for row in db.execute("SELECT DISTINCT asset_id FROM variants")]
+            if asset_ids:
+                db.execute("INSERT OR IGNORE INTO tags(name) VALUES (?)", ("with_variants",))
+                db.executemany("INSERT OR REPLACE INTO asset_tags(asset_id,tag_name,source) VALUES (?, ?, ?)", ((asset_id, "with_variants", source) for asset_id in asset_ids))
+                placeholders = ",".join("?" for _ in asset_ids)
+                db.execute(f"DELETE FROM asset_tags WHERE tag_name=? AND source=? AND asset_id NOT IN ({placeholders})", ("with_variants", source, *asset_ids))
+            else:
+                db.execute("DELETE FROM asset_tags WHERE tag_name=? AND source=?", ("with_variants", source))
+
     def tags(self, include_trashed: bool = False) -> list[dict]:
         status = "" if include_trashed else "AND a.status='available'"
         with closing(self._connect()) as db:
@@ -489,7 +601,11 @@ class Catalog:
     def variants(self, asset_id: str) -> list[dict]:
         with closing(self._connect()) as db:
             rows = db.execute("SELECT id, recipe_json FROM variants WHERE asset_id=? ORDER BY created_at, rowid", (asset_id,)).fetchall()
-        return [dict(json.loads(row[1]), id=row[0]) for row in rows]
+        variants = []
+        for row in rows:
+            recipe = normalize(json.loads(row[1]))
+            variants.append(dict(recipe, id=row[0]))
+        return variants
 
     def current_variant_id(self, asset_id: str) -> str | None:
         with closing(self._connect()) as db:
