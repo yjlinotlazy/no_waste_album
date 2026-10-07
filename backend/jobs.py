@@ -1,5 +1,7 @@
 """Persistent local job state and lifecycle management."""
 
+from __future__ import annotations
+
 import json
 import sqlite3
 import uuid
@@ -7,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "stack_generation", "thumbnail_generation", "variant_thumbnail_generation", "clustering", "indexing", "catalog_scan"}
+INTERNAL_JOB_TYPES = {"variant_thumbnail_generation"}
 STALE_RUNNING_SECONDS = 120
 TRANSITIONS = {
     "queued": {"running", "cancelled"},
@@ -67,6 +70,18 @@ class JobStore:
         self.reconcile_stale()
         with closing(self._connect()) as db:
             return db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    def history(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """Return user-visible advanced jobs, excluding internal maintenance jobs."""
+        self.reconcile_stale()
+        limit = max(1, min(500, int(limit)))
+        offset = max(0, int(offset))
+        placeholders = ",".join("?" for _ in INTERNAL_JOB_TYPES)
+        params = tuple(INTERNAL_JOB_TYPES)
+        with closing(self._connect()) as db:
+            total = db.execute(f"SELECT COUNT(*) FROM jobs WHERE type NOT IN ({placeholders})", params).fetchone()[0]
+            rows = db.execute(f"SELECT id FROM jobs WHERE type NOT IN ({placeholders}) ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+        return [self.get(row[0]) for row in rows], total
 
     def reconcile_stale(self, stale_after_seconds: int = STALE_RUNNING_SECONDS) -> int:
         """Mark interrupted workers as failed while leaving queued jobs alone."""

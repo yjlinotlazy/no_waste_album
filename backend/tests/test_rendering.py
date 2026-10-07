@@ -108,15 +108,15 @@ class RenderingTests(unittest.TestCase):
             with Image.open(destination) as edited:
                 self.assertEqual(edited.size, (40, 60))
 
-    def test_rotation_crops_rotated_corners(self):
+    def test_rotation_preserves_final_crop_aspect(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             Image.new("RGB", (100, 80), (255, 255, 255)).save(root / "photo.jpg")
             destination = root / "rotated.png"
             Renderer(root).render("photo.jpg", {"rotate": 10}, destination)
             with Image.open(destination) as edited:
-                self.assertEqual(edited.size, (90, 65))
-                self.assertTrue(all(min(edited.getpixel(point)) > 200 for point in ((0, 0), (89, 0), (0, 64), (89, 64))))
+                self.assertEqual(edited.size, (83, 66))
+                self.assertTrue(all(min(edited.getpixel(point)) > 200 for point in ((0, 0), (82, 0), (0, 65), (82, 65))))
 
     def test_kindle_filter_writes_16_level_grayscale_png(self):
         with tempfile.TemporaryDirectory() as tmp:

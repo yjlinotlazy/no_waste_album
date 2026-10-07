@@ -51,6 +51,30 @@ def _apply_curves(image: Image.Image, curves: dict) -> Image.Image:
     return Image.merge("RGB", channels)
 
 
+def _apply_hsl(image: Image.Image, hsl: dict) -> Image.Image:
+    """Apply Lightroom-style color-range hue, saturation and luminance edits."""
+    if image.mode == "L":
+        return image
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    hue, saturation, value = cv2.split(hsv)
+    centers = {"red": 0.0, "orange": 15.0, "yellow": 30.0, "green": 60.0, "cyan": 90.0, "blue": 120.0, "purple": 150.0, "magenta": 170.0}
+    for channel, center in centers.items():
+        adjustment = hsl.get(channel) or {}
+        hue_delta = float(adjustment.get("hue", 0.0))
+        saturation_delta = float(adjustment.get("saturation", 0.0))
+        luminance_delta = float(adjustment.get("luminance", 0.0))
+        if not any(abs(value) > 1e-6 for value in (hue_delta, saturation_delta, luminance_delta)):
+            continue
+        distance = np.abs(hue - center)
+        distance = np.minimum(distance, 180.0 - distance)
+        weight = np.exp(-0.5 * (distance / 18.0) ** 2) * np.clip(saturation / 64.0, 0.0, 1.0)
+        hue = (hue + hue_delta * 0.18 * weight) % 180.0
+        saturation = np.clip(saturation + saturation_delta * weight, 0.0, 255.0)
+        value = np.clip(value * (1.0 + luminance_delta * 0.006 * weight), 0.0, 255.0)
+    return Image.fromarray(cv2.cvtColor(cv2.merge([hue, saturation, value]).astype(np.uint8), cv2.COLOR_HSV2RGB), mode="RGB")
+
+
 def _autumn_grade(image: Image.Image) -> Image.Image:
     """Apply the color portion of the supplied autumn reference grade.
 
@@ -180,6 +204,14 @@ def _apply_depth_of_field(image: Image.Image, depth: Image.Image, matte: Image.I
     blur_alpha = np.clip(defocus, 0.0, 1.0) * (1.0 - np.clip(feathered_foreground * 0.99, 0.0, 1.0))
     result = source * (1.0 - blur_alpha[..., None]) + background * blur_alpha[..., None]
 
+    # Real defocus does not produce an unnaturally clean, plastic background.
+    # Add deterministic monochrome sensor grain only where the image is out of
+    # focus.  A fixed seed keeps previews and saved renders identical.
+    grain_rng = np.random.default_rng(20261006)
+    grain = grain_rng.normal(0.0, 1.0, (height, width, 1)).astype(np.float32)
+    grain_strength = np.clip(blur_alpha * (1.0 + 3.5 * amount), 0.0, 1.0)
+    result += grain * grain_strength[..., None] * 5.0
+
     # The subject remains the original pixels.  Do not sharpen it here: the
     # old extra sharpening created a visible digital halo around the child.
     return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8), mode="RGB")
@@ -221,6 +253,33 @@ def _largest_inner_rect(width: float, height: float, angle: float) -> tuple[int,
     if quarter_turn:
         inner_width, inner_height = inner_height, inner_width
     return max(1, math.floor(inner_width)), max(1, math.floor(inner_height))
+
+
+def _largest_inner_rect_with_aspect(width: float, height: float, angle: float, aspect: float) -> tuple[int, int]:
+    """Find the largest centered axis-aligned crop with a required ratio."""
+    aspect = max(float(aspect), 1e-6)
+    radians = math.radians(float(angle))
+    sine, cosine = abs(math.sin(radians)), abs(math.cos(radians))
+    bound_width = width * cosine + height * sine
+    bound_height = width * sine + height * cosine
+
+    def fits(candidate_height: float) -> bool:
+        candidate_width = candidate_height * aspect
+        for x, y in ((-candidate_width / 2, -candidate_height / 2), (candidate_width / 2, -candidate_height / 2), (candidate_width / 2, candidate_height / 2), (-candidate_width / 2, candidate_height / 2)):
+            source_x = abs(x * cosine + y * sine)
+            source_y = abs(-x * sine + y * cosine)
+            if source_x > width / 2 or source_y > height / 2:
+                return False
+        return True
+
+    low, high = 0.0, min(bound_height, bound_width / aspect)
+    for _ in range(40):
+        middle = (low + high) / 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle
+    return max(1, math.floor(low * aspect)), max(1, math.floor(low))
 
 
 def _tone_map(image, shadows: float, highlights: float, gamma: float) -> Image.Image:
@@ -268,6 +327,69 @@ def _auto_develop(image: Image.Image, recipe: dict) -> Image.Image:
     result = Image.fromarray(np.uint8(np.clip(rgb, 0, 1) * 255), mode="RGB")
     if recipe.get("local_contrast"):
         result = _clahe_luminance(result)
+    return result
+
+
+def _apply_basic_adjustments(image: Image.Image, adjustments: dict) -> Image.Image:
+    """Apply the Lightroom-style global controls used by 画面调整."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    exposure = float(adjustments.get("exposure", 0.0))
+    rgb *= 2.0 ** exposure
+    brightness = float(adjustments.get("brightness", 0.0))
+    if brightness:
+        rgb += brightness * 0.25
+    contrast = float(adjustments.get("contrast", 0.0))
+    if contrast:
+        rgb = (rgb - 0.5) * (1.0 + contrast) + 0.5
+    luminance = np.clip(rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32), 0.0, 1.0)
+    highlights = float(adjustments.get("highlights", 0.0))
+    shadows = float(adjustments.get("shadows", 0.0))
+    blacks = float(adjustments.get("blacks", 0.0))
+    if highlights:
+        weight = luminance ** 2.0
+        rgb += highlights * 0.35 * weight[..., None]
+    if shadows:
+        weight = (1.0 - luminance) ** 2.0
+        rgb += shadows * 0.35 * weight[..., None]
+    if blacks:
+        weight = np.clip((0.35 - luminance) / 0.35, 0.0, 1.0) ** 2.0
+        rgb += blacks * 0.25 * weight[..., None]
+    saturation = float(adjustments.get("saturation", 0.0))
+    vibrance = float(adjustments.get("vibrance", 0.0))
+    hsv = cv2.cvtColor(np.uint8(np.clip(rgb, 0.0, 1.0) * 255), cv2.COLOR_RGB2HSV).astype(np.float32)
+    if saturation:
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 + saturation), 0.0, 255.0)
+    if vibrance:
+        low_saturation = 1.0 - hsv[:, :, 1] / 255.0
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] + vibrance * 100.0 * low_saturation, 0.0, 255.0)
+    rgb = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
+    temperature = float(adjustments.get("temperature", 0.0))
+    tint = float(adjustments.get("tint", 0.0))
+    if temperature or tint:
+        lab = cv2.cvtColor(np.uint8(np.clip(rgb, 0.0, 1.0) * 255), cv2.COLOR_RGB2LAB).astype(np.float32)
+        lab[:, :, 2] = np.clip(lab[:, :, 2] + temperature * 12.0, 0.0, 255.0)
+        lab[:, :, 1] = np.clip(lab[:, :, 1] + tint * 12.0, 0.0, 255.0)
+        rgb = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32) / 255.0
+    result = Image.fromarray(np.uint8(np.clip(rgb, 0.0, 1.0) * 255), mode="RGB")
+    noise_reduction = max(0.0, float(adjustments.get("noise_reduction", 0.0)))
+    if noise_reduction:
+        softened = result.filter(ImageFilter.GaussianBlur(0.45 + noise_reduction * 1.25))
+        result = Image.blend(result, softened, min(1.0, noise_reduction * 0.65))
+    clarity = float(adjustments.get("clarity", 0.0))
+    sharpness = float(adjustments.get("sharpness", 0.0))
+    if clarity:
+        result = ImageEnhance.Contrast(result).enhance(1.0 + clarity * 0.28)
+    if sharpness:
+        result = result.filter(ImageFilter.UnsharpMask(radius=1.15, percent=round(135 * abs(sharpness)), threshold=2)) if sharpness > 0 else result.filter(ImageFilter.GaussianBlur(abs(sharpness) * 0.8))
+    vignette = float(adjustments.get("vignette", 0.0))
+    if vignette:
+        height, width = rgb.shape[:2]
+        y, x = np.mgrid[0:height, 0:width]
+        distance = np.sqrt(((x - width / 2) / max(1, width / 2)) ** 2 + ((y - height / 2) / max(1, height / 2)) ** 2)
+        edge = np.clip((distance - 0.35) / 0.75, 0.0, 1.0) ** 1.5
+        factor = 1.0 - vignette * 0.65 * edge
+        pixels = np.asarray(result, dtype=np.float32) * factor[..., None]
+        result = Image.fromarray(np.uint8(np.clip(pixels, 0.0, 255.0)), mode="RGB")
     return result
 
 
@@ -363,7 +485,7 @@ class Renderer:
             recipe["crop"] = {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
             recipe["rotate"] = 0
         if "adjustments" in disabled_nodes:
-            recipe["adjustments"] = {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "temperature": 0.0, "depth": 0.0}
+            recipe["adjustments"] = {key: 0.0 for key in ("exposure", "brightness", "contrast", "highlights", "shadows", "blacks", "saturation", "vibrance", "temperature", "tint", "sharpness", "clarity", "noise_reduction", "vignette", "depth")}
         image = ImageOps.exif_transpose(_load_image(source)).convert("RGB")
         depth = None
         matte = None
@@ -379,25 +501,37 @@ class Renderer:
                     with Image.open(matte_path) as matte_image:
                         matte = ImageOps.exif_transpose(matte_image).convert("L").resize(image.size, Image.Resampling.BILINEAR)
         crop = recipe["crop"]
-        width, height = image.size
-        box = (round(crop["x"] * width), round(crop["y"] * height), round((crop["x"] + crop["width"]) * width), round((crop["y"] + crop["height"]) * height))
+        full_crop = all(abs(float(crop[key]) - expected) < 1e-9 for key, expected in (("x", 0.0), ("y", 0.0), ("width", 1.0), ("height", 1.0)))
+        source_width, source_height = image.size
+        if recipe["rotate"]:
+            image = image.rotate(recipe["rotate"], expand=True, fillcolor=(0, 0, 0))
+            if depth:
+                depth = depth.rotate(recipe["rotate"], expand=True, fillcolor=0)
+            if matte:
+                matte = matte.rotate(recipe["rotate"], expand=True, fillcolor=0)
+            crop_aspect = (crop["width"] * source_width) / max(crop["height"] * source_height, 1e-6)
+            quarter_turn = round(abs(float(recipe["rotate"])) / 90) % 2
+            if quarter_turn:
+                crop_aspect = 1 / max(crop_aspect, 1e-6)
+            crop_width, crop_height = _largest_inner_rect_with_aspect(source_width, source_height, recipe["rotate"], crop_aspect)
+            left = max(0, (image.width - crop_width) // 2)
+            top = max(0, (image.height - crop_height) // 2)
+            inner_box = (left, top, left + crop_width, top + crop_height)
+            image = image.crop(inner_box)
+            if depth:
+                depth = depth.crop(inner_box)
+            if matte:
+                matte = matte.crop(inner_box)
+            width, height = image.size
+            box = (round(crop["x"] * width), round(crop["y"] * height), round((crop["x"] + crop["width"]) * width), round((crop["y"] + crop["height"]) * height))
+        else:
+            width, height = image.size
+            box = (round(crop["x"] * width), round(crop["y"] * height), round((crop["x"] + crop["width"]) * width), round((crop["y"] + crop["height"]) * height))
         image = image.crop(box)
         if depth:
             depth = depth.crop(box)
         if matte:
             matte = matte.crop(box)
-        if recipe["rotate"]:
-            image = image.rotate(recipe["rotate"], expand=True, fillcolor=(0, 0, 0))
-            crop_width, crop_height = _largest_inner_rect(width=box[2] - box[0], height=box[3] - box[1], angle=recipe["rotate"])
-            left = max(0, (image.width - crop_width) // 2)
-            top = max(0, (image.height - crop_height) // 2)
-            image = image.crop((left, top, left + crop_width, top + crop_height))
-            if depth:
-                depth = depth.rotate(recipe["rotate"], expand=True, fillcolor=0)
-                depth = depth.crop((left, top, left + crop_width, top + crop_height))
-            if matte:
-                matte = matte.rotate(recipe["rotate"], expand=True, fillcolor=0)
-                matte = matte.crop((left, top, left + crop_width, top + crop_height))
         # Crop and rotate at source resolution first. Downscaling the whole
         # image before the crop wastes the pixels needed for a sharp close-up.
         if max_size:
@@ -410,17 +544,28 @@ class Renderer:
         if depth is not None and depth_strength:
             image = _apply_depth_of_field(image, depth, matte, depth_strength)
         adjustments = recipe["adjustments"]
-        image = ImageEnhance.Brightness(image).enhance(1 + adjustments["brightness"])
-        image = ImageEnhance.Contrast(image).enhance(1 + adjustments["contrast"])
-        image = ImageEnhance.Color(image).enhance(1 + adjustments["saturation"])
+        image = _apply_basic_adjustments(image, adjustments)
         temperature = adjustments["temperature"]
         auto_wb = recipe.get("auto_wb") or {}
         if auto_wb.get("enabled") and "auto_wb" not in disabled_nodes:
             temperature += auto_wb.get("temperature", 0)
         if temperature:
-            color = (255, 145, 55) if temperature > 0 else (65, 140, 255)
-            overlay = Image.new("RGB", image.size, color)
-            image = Image.blend(image, overlay, abs(temperature) * 0.2)
+            image = _apply_basic_adjustments(image, {"temperature": temperature})
+        lut = recipe.get("lut") or {}
+        if self.lut_dir and lut.get("id") and not any(node["type"] == "lut" and not node["enabled"] for node in recipe.get("nodes", [])):
+            lut_path = self.lut_dir / str(lut["id"])
+            if lut_path.is_file():
+                rgb = np.asarray(image, dtype=np.uint8)
+                was_grayscale = rgb.ndim == 2
+                if was_grayscale:
+                    rgb = np.repeat(rgb[..., None], 3, axis=2)
+                mapped = apply_cube(rgb, load_cube(lut_path), lut.get("intensity", 1.0), lut.get("input_profile", "display"))
+                image = Image.fromarray(np.uint8(mapped * 255), mode="RGB")
+                if was_grayscale:
+                    image = image.convert("L")
+        if "hsl" not in disabled_nodes:
+            image = _apply_hsl(image, recipe.get("hsl", {}))
+
         selected_filter = recipe["filter"]
         if selected_filter == "fade":
             image = ImageEnhance.Contrast(image).enhance(0.76)
@@ -494,12 +639,6 @@ class Renderer:
                 image = sharpened
         if recipe.get("local_correction") == "reduce_overexposure":
             image = _reduce_overexposure(image, recipe.get("mask_strokes"))
-        lut = recipe.get("lut") or {}
-        if self.lut_dir and lut.get("id") and not any(node["type"] == "lut" and not node["enabled"] for node in recipe.get("nodes", [])):
-            lut_path = self.lut_dir / str(lut["id"])
-            if lut_path.is_file():
-                rgb = np.asarray(image, dtype=np.uint8)
-                image = Image.fromarray(np.uint8(apply_cube(rgb, load_cube(lut_path), lut.get("intensity", 1.0), lut.get("input_profile", "display")) * 255), mode="RGB")
         if not any(node["type"] == "curves" and not node["enabled"] for node in recipe.get("nodes", [])):
             image = _apply_curves(image, recipe.get("curves", {}))
         if not any(node["type"] == "aperture" and not node["enabled"] for node in recipe.get("nodes", [])):

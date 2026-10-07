@@ -32,6 +32,9 @@ from server_logging import CountingWriter, RequestLogger
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif", ".heic", ".heif"}
 MODE_HEADER = "X-App-Mode"
+CACHE_CLEANUP_DIRS = ("depths", "portrait-mattes", "previews")
+CACHE_MAX_AGE_SECONDS = 10 * 24 * 60 * 60
+CACHE_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 class Library:
@@ -50,6 +53,8 @@ class Library:
         self.jobs = JobStore(self.data_dir / "jobs.sqlite")
         self.preview_dir = self.data_dir / "previews"
         self.preview_lock = threading.Lock()
+        self.cache_cleanup_thread = threading.Thread(target=self._cache_cleanup_loop, name="cache-cleanup", daemon=True)
+        self.cache_cleanup_thread.start()
         self.scan_state = "pending"
         self.scan_result = None
         self.thumbnail_queue = queue.Queue()
@@ -65,6 +70,42 @@ class Library:
                 self.thumbnail_queue.put(pending)
             elif pending["type"] == "stack_generation":
                 self.stack_queue.put(pending)
+
+    def _cleanup_cache_files(self) -> int:
+        """Remove old, rebuildable cache files without touching other data."""
+        cutoff = time.time() - CACHE_MAX_AGE_SECONDS
+        removed = 0
+        for directory_name in CACHE_CLEANUP_DIRS:
+            directory = self.data_dir / directory_name
+            if not directory.is_dir():
+                continue
+            try:
+                candidates = directory.rglob("*")
+            except OSError:
+                continue
+            for path in candidates:
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    stat = path.stat()
+                    # mtime protects newly generated files on systems where
+                    # atime updates are delayed by relatime/noatime mounts.
+                    last_used = max(stat.st_atime, stat.st_mtime)
+                    if last_used < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
+
+    def _cache_cleanup_loop(self):
+        while True:
+            try:
+                self._cleanup_cache_files()
+            except Exception:
+                # Cache cleanup must never affect server availability.
+                pass
+            time.sleep(CACHE_CLEANUP_INTERVAL_SECONDS)
 
     def _run_serial_queue(self, job_queue):
         while True:
@@ -399,8 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                 page = max(1, int(query.get("page", ["1"])[0]))
             except ValueError:
                 return self.send_json({"error": "invalid job pagination"}, HTTPStatus.BAD_REQUEST)
-            total = self.library.jobs.count()
-            jobs = self.library.jobs.list(page_size, (page - 1) * page_size)
+            jobs, total = self.library.jobs.history(page_size, (page - 1) * page_size)
             return self.send_json({"jobs": jobs, "page": page, "page_size": page_size, "total": total, "pages": max(1, (total + page_size - 1) // page_size)})
         result_match = re.match(r"^/api/jobs/([^/]+)/results$", parsed.path)
         if result_match:
