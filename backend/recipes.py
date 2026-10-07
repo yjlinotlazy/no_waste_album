@@ -9,7 +9,7 @@ FILTERS = {"none", "warm", "mono", "fade", "matte", "vintage", "cinematic", "aut
 
 def default_recipe() -> dict:
     identity = [[0, 0], [255, 255]]
-    return {"schema_version": RECIPE_VERSION, "crop": {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}, "adjustments": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "temperature": 0.0, "depth": 0.0}, "curves": {channel: identity[:] for channel in CURVE_CHANNELS}, "aperture": {"enabled": False, "x": 0.5, "y": 0.6, "radius": 0.18, "strength": 1.0}, "lut": {"id": "", "intensity": 1.0, "input_profile": "display"}, "filter": "none", "local_correction": "none", "nodes": [], "rotate": 0}
+    return {"schema_version": RECIPE_VERSION, "crop": {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}, "adjustments": {"brightness": 0.0, "contrast": 0.0, "saturation": 0.0, "temperature": 0.0, "depth": 0.0}, "auto_wb": {"enabled": False, "temperature": 0.0}, "curves": {channel: identity[:] for channel in CURVE_CHANNELS}, "aperture": {"enabled": False, "x": 0.5, "y": 0.6, "radius": 0.18, "strength": 1.0}, "lut": {"id": "", "intensity": 1.0, "input_profile": "display"}, "filter": "none", "local_correction": "none", "nodes": [], "rotate": 0}
 
 
 def _number(value, fallback=0.0):
@@ -35,6 +35,8 @@ def normalize(recipe: dict) -> dict:
     base["rotate"] = round(_clamp(recipe.get("rotate"), -180, 180), 2)
     base["adjustments"] = {key: _clamp(adjustments.get(key), -1, 1) for key in ("brightness", "contrast", "saturation", "temperature")}
     base["adjustments"]["depth"] = _clamp(adjustments.get("depth"), 0, 1)
+    raw_auto_wb = recipe.get("auto_wb") or {}
+    base["auto_wb"] = {"enabled": bool(raw_auto_wb.get("enabled", False)), "temperature": _clamp(raw_auto_wb.get("temperature"), -1, 1)}
     raw_curves = recipe.get("curves") or {}
     curves = {}
     for channel in CURVE_CHANNELS:
@@ -87,6 +89,8 @@ def normalize(recipe: dict) -> dict:
             raw_nodes.append({"type": "canvas", "name": "画布调整", "enabled": True})
         if any(abs(_number(base["adjustments"].get(key))) > 1e-9 for key in ("brightness", "contrast", "saturation", "temperature", "depth")):
             raw_nodes.append({"type": "adjustments", "name": "画面调整", "enabled": True})
+        if base["auto_wb"]["enabled"]:
+            raw_nodes.append({"type": "auto_wb", "name": "自动白平衡", "enabled": True})
         if any(points != [[0, 0], [255, 255]] for points in curves.values()):
             raw_nodes.append({"type": "curves", "name": "曲线", "enabled": True})
         if base["aperture"]["enabled"]:
@@ -111,6 +115,8 @@ def normalize(recipe: dict) -> dict:
             node_name = "画布调整"
         elif node_type == "adjustments":
             node_name = "画面调整"
+        elif node_type == "auto_wb":
+            node_name = "自动白平衡"
         nodes.append({"id": str(node.get("id", f"node-{index + 1}"))[:80], "type": node_type, "name": node_name, "enabled": bool(node.get("enabled", True))})
     existing_types = {node["type"] for node in nodes}
     has_canvas = base["crop"] != default_recipe()["crop"] or bool(base["rotate"])
@@ -118,6 +124,8 @@ def normalize(recipe: dict) -> dict:
         nodes.insert(0, {"id": "canvas", "type": "canvas", "name": "画布调整", "enabled": True})
     if has_adjustments and "adjustments" not in existing_types:
         nodes.append({"id": "adjustments", "type": "adjustments", "name": "画面调整", "enabled": True})
+    if base["auto_wb"]["enabled"] and "auto_wb" not in existing_types:
+        nodes.append({"id": "auto-wb", "type": "auto_wb", "name": "自动白平衡", "enabled": True})
     if selected_filter != "none" and "filter" not in existing_types:
         nodes.append({"id": "filter", "type": "filter", "name": selected_filter, "enabled": True})
     if local_correction != "none" and "local_correction" not in existing_types:

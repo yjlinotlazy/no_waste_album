@@ -6,7 +6,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "stack_generation", "thumbnail_generation", "clustering", "indexing", "catalog_scan"}
+JOB_TYPES = {"analysis", "quality_detection", "auto_develop", "stack_generation", "thumbnail_generation", "variant_thumbnail_generation", "clustering", "indexing", "catalog_scan"}
 STALE_RUNNING_SECONDS = 120
 TRANSITIONS = {
     "queued": {"running", "cancelled"},

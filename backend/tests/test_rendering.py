@@ -6,7 +6,8 @@ from PIL import Image
 import numpy as np
 
 from backend.rendering import Renderer
-from backend.luts import apply_cube, display_name, load_cube
+from backend.luts import apply_cube, category, display_name, load_cube
+from backend.recipes import normalize
 
 
 class RenderingTests(unittest.TestCase):
@@ -22,11 +23,23 @@ class RenderingTests(unittest.TestCase):
             lut_path.write_text("#title:FLog2C_to_Velvia\nLUT_3D_SIZE 2\n", encoding="utf-8")
             self.assertEqual(display_name(lut_path), "FLog2C_to_Velvia")
 
+    def test_kodak_luts_have_their_own_category(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lut_path = Path(tmp) / "IWLTBAP Aspen - Standard.cube"
+            lut_path.write_text('TITLE "IWLTBAP Aspen (Rec.709)"\n', encoding="utf-8")
+            self.assertEqual(category(lut_path), "kodak")
+
     def test_cube_parser_ignores_title_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             lut_path = Path(tmp) / "portrait.cube"
             lut_path.write_text('TITLE "Soft Portrait"\nLUT_3D_SIZE 2\n' + "\n".join("0 0 0" for _ in range(8)), encoding="utf-8")
             self.assertEqual(load_cube(lut_path)["size"], 2)
+
+    def test_auto_wb_is_a_separate_node(self):
+        recipe = normalize({"auto_wb": {"enabled": True, "temperature": 0.4}})
+        self.assertEqual([node["type"] for node in recipe["nodes"]], ["auto_wb"])
+        disabled = normalize({"auto_wb": {"enabled": True, "temperature": 0.4}, "nodes": [{"type": "auto_wb", "enabled": False}]})
+        self.assertFalse(disabled["nodes"][0]["enabled"])
 
     def test_cube_uses_red_as_fastest_varying_axis(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,8 @@
 """Local worker for persisted background jobs."""
 
 import argparse
+import hashlib
+import json
 import time
 import uuid
 
@@ -12,6 +14,8 @@ from .quality import DEFAULT_THRESHOLD, QualityStore, assess
 from .autodevelop import estimate
 from .stacking import group_assets, generation_config, phash
 from .thumbnails import THUMBNAIL_VERSION, render as render_thumbnail
+from .thumbnails import render_variant as render_variant_thumbnail
+from .rendering import Renderer
 
 
 class Worker:
@@ -20,6 +24,18 @@ class Worker:
         self.catalog = catalog
         self.features = features or FeatureStore(catalog.database_path.parent / "features.sqlite")
         self.quality = QualityStore(catalog.database_path)
+        self.renderer = Renderer(catalog.root, catalog.database_path.parent / "luts")
+
+    def _canonical_variant(self, asset):
+        variant_id = self.catalog.current_variant_id(asset.id)
+        if not variant_id:
+            return None
+        return next((variant for variant in self.catalog.variants(asset.id) if variant["id"] == variant_id), None)
+
+    @staticmethod
+    def _variant_fingerprint(variant: dict) -> str:
+        payload = json.dumps(variant, sort_keys=True, separators=(",", ":"))
+        return "variant:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def run_once(self) -> dict | None:
         job = self.jobs.claim_next()
@@ -78,12 +94,16 @@ class Worker:
                         errors += 1
                     self.jobs.update_progress(job["id"], round(index / max(1, total) * 100), {"folder": folder, "images_scanned": index, "images_total": total, "variants_created": created, "errors": errors})
                 result = {"folder": folder, "analyzed": total - errors, "variants_created": created, "errors": errors}
-            elif job["type"] == "thumbnail_generation":
+            elif job["type"] in {"thumbnail_generation", "variant_thumbnail_generation"}:
                 folder = job["scope"].get("folder", "")
                 size = int(job["scope"].get("thumbnail_size", 256))
                 quality = int(job["scope"].get("thumbnail_quality", 88))
                 clean_start = bool(job["scope"].get("clean_start", False))
-                assets = self.catalog.assets_in_scope(folder)
+                if job["type"] == "variant_thumbnail_generation":
+                    asset = self.catalog.get(job["scope"].get("asset_id", ""))
+                    assets = [asset] if asset else []
+                else:
+                    assets = self.catalog.assets_in_scope(folder)
                 total = len(assets)
                 created = 0
                 skipped = 0
@@ -96,12 +116,16 @@ class Worker:
                         return current
                     try:
                         target = thumbnail_dir / f"{asset.id}.jpg"
-                        fingerprint = self.catalog.content_fingerprint(asset.id)
+                        variant = self._canonical_variant(asset)
+                        fingerprint = self._variant_fingerprint(variant) if variant else self.catalog.content_fingerprint(asset.id)
                         record = self.catalog.thumbnail_record(asset.id)
                         if not clean_start and record and record[0] == fingerprint and record[1] == f"thumbnails/{asset.id}.jpg" and record[4] == THUMBNAIL_VERSION and target.is_file():
                             skipped += 1
                         else:
-                            width, height = render_thumbnail(self.catalog.root / asset.relative_path, target, size, quality)
+                            if variant:
+                                width, height = render_variant_thumbnail(self.renderer, asset.relative_path, variant, target, size, quality)
+                            else:
+                                width, height = render_thumbnail(self.catalog.root / asset.relative_path, target, size, quality)
                             self.catalog.save_thumbnail_record(asset.id, fingerprint, f"thumbnails/{asset.id}.jpg", width, height, THUMBNAIL_VERSION)
                             created += 1
                     except Exception:

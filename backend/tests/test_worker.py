@@ -164,6 +164,29 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(clean_result["result"]["thumbnails_created"], 1)
             self.assertTrue((root / "thumbnails").exists())
 
+    def test_variant_thumbnail_job_uses_canonical_render(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "photo.jpg"
+            Image.new("RGB", (800, 600), (30, 40, 50)).save(image_path)
+            catalog = Catalog(root, root / "catalog.sqlite")
+            catalog.scan("full")
+            asset = catalog.page()[0][0]
+            variant = catalog.add_variant(asset.id, {
+                "id": "variant-1",
+                "adjustments": {"brightness": 0.8},
+            })
+            catalog.set_current_variant(asset.id, variant["id"])
+            jobs = JobStore(root / "jobs.sqlite")
+            job = jobs.create("variant_thumbnail_generation", {"asset_id": asset.id})
+
+            result = Worker(jobs, catalog).run_once()
+
+            self.assertEqual(result["state"], "completed")
+            self.assertEqual(result["result"]["thumbnails_created"], 1)
+            thumbnail = Image.open(root / "thumbnails" / f"{asset.id}.jpg").convert("RGB")
+            self.assertGreater(sum(thumbnail.getpixel((0, 0))), 150)
+
 
 if __name__ == "__main__":
     unittest.main()

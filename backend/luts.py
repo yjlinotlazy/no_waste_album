@@ -1,6 +1,7 @@
 """Small, dependency-free .cube 3D LUT parser and applicator."""
 
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -28,6 +29,20 @@ def display_name(path: Path) -> str:
     except (OSError, UnicodeDecodeError):
         pass
     return path.stem
+
+
+def category(path: Path) -> str:
+    """Classify common camera/film LUT families for the editor UI."""
+    value = f"{path.stem} {display_name(path)}".casefold()
+    if any(term in value for term in ("lomo", "lomography", "sedona")):
+        return "lomo"
+    if any(term in value for term in ("kodak", "portra", "ektar", "kodachrome", "gold 200", "aspen")):
+        return "kodak"
+    if re.search(r"f-?log|flog|fujifilm|velvia|classic[ ._-]?chrome|pro[ ._-]?neg|eterna", value):
+        return "fuji"
+    if re.search(r"s-?log|slog|sony|sgamut|cine", value):
+        return "sony"
+    return "creative"
 
 
 def load_cube(path: Path) -> dict:

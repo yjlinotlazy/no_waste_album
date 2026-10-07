@@ -76,6 +76,15 @@ class Library:
             finally:
                 job_queue.task_done()
 
+    def enqueue_variant_thumbnail(self, asset_id: str):
+        job = self.jobs.create("variant_thumbnail_generation", {
+            "asset_id": asset_id,
+            "thumbnail_size": 256,
+            "thumbnail_quality": 88,
+        })
+        self.thumbnail_queue.put(job)
+        return job
+
     def _migrate_legacy_recipes(self):
         legacy_path = self.data_dir / "recipes.json"
         if not legacy_path.is_file():
@@ -156,7 +165,10 @@ class Library:
         return path if path and path.is_file() else None
 
     def thumbnail_url(self, asset_id):
-        return f"/thumbnails/{asset_id}.jpg" if self.thumbnail_path(asset_id) else None
+        path = self.thumbnail_path(asset_id)
+        if not path:
+            return None
+        return f"/thumbnails/{asset_id}.jpg?v={path.stat().st_mtime_ns}"
 
     def depth_path(self, asset_id):
         asset = self.catalog.get(asset_id)
@@ -420,8 +432,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/tags":
             return self.send_json({"tags": self.library.catalog.tags()})
         if parsed.path == "/api/luts":
-            from backend.luts import display_name
-            luts = [{"id": path.name, "name": display_name(path)} for path in sorted(self.library.lut_dir.glob("*.cube"))]
+            from backend.luts import category, display_name
+            luts = [{"id": path.name, "name": display_name(path), "category": category(path)} for path in sorted(self.library.lut_dir.glob("*.cube"))]
             return self.send_json({"luts": luts})
         asset_match = re.match(r"^/api/assets/([^/]+)$", parsed.path)
         if asset_match:
@@ -557,8 +569,8 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as error:
                 target.unlink(missing_ok=True)
                 return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
-            from backend.luts import display_name
-            return self.send_json({"id": lut_id, "name": display_name(target)}, HTTPStatus.CREATED)
+            from backend.luts import category, display_name
+            return self.send_json({"id": lut_id, "name": display_name(target), "category": category(target)}, HTTPStatus.CREATED)
         if parsed.path == "/api/preview":
             payload = self.body_json()
             asset_id = str(payload.get("asset_id", ""))
@@ -678,7 +690,8 @@ class Handler(BaseHTTPRequestHandler):
                     current_variant_id = self.library.catalog.set_current_variant(asset_id, variant_id or None)
                 except KeyError as error:
                     return self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
-            return self.send_json({"asset_id": asset_id, "current_variant_id": current_variant_id})
+                thumbnail_job = self.library.enqueue_variant_thumbnail(asset_id) if current_variant_id else None
+            return self.send_json({"asset_id": asset_id, "current_variant_id": current_variant_id, "thumbnail_job_id": thumbnail_job["id"] if thumbnail_job else None})
         if parsed.path == "/api/recipes":
             if not self.operator_only(): return
             payload = self.body_json()
@@ -710,6 +723,8 @@ class Handler(BaseHTTPRequestHandler):
                     recipe = self.library.metadata.replace_variant(asset_id, variant_id, self.body_json().get("recipe", {}))
                 except (KeyError, ValueError) as error:
                     return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                if self.library.catalog.current_variant_id(asset_id) == variant_id:
+                    self.library.enqueue_variant_thumbnail(asset_id)
             return self.send_json(recipe)
         if parsed.path == "/api/export":
             if not self.operator_only(): return

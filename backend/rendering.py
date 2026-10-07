@@ -122,24 +122,43 @@ def _apply_aperture(image: Image.Image, aperture: dict) -> Image.Image:
 
 
 def _apply_depth_of_field(image: Image.Image, depth: Image.Image, matte: Image.Image | None, strength: float) -> Image.Image:
-    """Render HEIC portrait depth without smearing the subject into the background."""
+    """Render HEIC portrait depth as optical defocus, not a flat blur overlay.
+
+    Apple's portrait result defocuses anything in front of or behind the
+    selected focal plane.  The old implementation only blurred pixels judged
+    to be far away, then retained too much of the original image.  That made
+    the background look like a sharp photo with Gaussian blur painted on it.
+    """
     amount = max(0.0, min(1.0, float(strength)))
     if amount <= 0:
         return image
     source = np.asarray(image, dtype=np.float32)
     height, width = source.shape[:2]
     depth_values = np.asarray(depth.convert("L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
-    far = np.clip((0.68 - depth_values) / 0.60, 0.0, 1.0)
-    far = np.power(cv2.GaussianBlur(far, (0, 0), 1.2), 1.15) * amount
+
+    # The portrait matte identifies the focal subject.  Use its depth as the
+    # focal plane, so both the distant sky/buildings and near snow defocus.
+    if matte is not None:
+        matte_probe = np.asarray(matte.convert("L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+        subject_depth = depth_values[matte_probe > 0.55]
+        focus_depth = float(np.median(subject_depth)) if subject_depth.size else 0.52
+    else:
+        matte_probe = None
+        focus_depth = 0.52
+
+    defocus = np.abs(depth_values - focus_depth)
+    defocus = np.clip((defocus - 0.035) / 0.43, 0.0, 1.0)
+    defocus = np.power(cv2.GaussianBlur(defocus, (0, 0), 1.4), 0.88)
+    defocus = np.clip(defocus * amount * 1.35, 0.0, 1.0)
 
     if matte is not None:
-        matte_values = np.asarray(matte.convert("L").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+        matte_values = matte_probe
         foreground = np.clip((matte_values - 0.08) / 0.32, 0.0, 1.0)
     else:
         foreground = np.zeros((height, width), dtype=np.float32)
 
     # Keep the hard subject out of the blur kernel; feather only the final edge.
-    foreground_core = (foreground > 0.35).astype(np.float32)
+    foreground_core = (foreground > 0.42).astype(np.float32)
     background_support = 1.0 - foreground_core
     feathered_foreground = cv2.GaussianBlur(foreground, (0, 0), 1.4)
 
@@ -149,7 +168,7 @@ def _apply_depth_of_field(image: Image.Image, depth: Image.Image, matte: Image.I
         return np.divide(numerator, np.maximum(support[..., None], 1e-3), out=source.copy(), where=support[..., None] > 1e-3)
 
     blurred = [source, protected_blur(4.0), protected_blur(9.0), protected_blur(16.0)]
-    position = np.clip(far * 3.0, 0.0, 2.999)
+    position = np.clip(defocus * 3.0, 0.0, 2.999)
     index = np.floor(position).astype(np.int32)
     fraction = position - index
     background = np.zeros_like(source)
@@ -158,14 +177,11 @@ def _apply_depth_of_field(image: Image.Image, depth: Image.Image, matte: Image.I
         blend = blurred[level] * (1.0 - fraction[..., None]) + blurred[level + 1] * fraction[..., None]
         background[selected] = blend[selected]
 
-    blur_alpha = np.clip(far, 0.0, 1.0) * (1.0 - np.clip(feathered_foreground * 0.98, 0.0, 1.0))
+    blur_alpha = np.clip(defocus, 0.0, 1.0) * (1.0 - np.clip(feathered_foreground * 0.99, 0.0, 1.0))
     result = source * (1.0 - blur_alpha[..., None]) + background * blur_alpha[..., None]
 
-    # Restore a restrained crispness lift inside the portrait matte.
-    detail_base = cv2.GaussianBlur(source, (0, 0), 1.0)
-    sharpened = np.clip(source + (source - detail_base) * 0.22, 0, 255)
-    subject_alpha = foreground * 0.35
-    result = result * (1.0 - subject_alpha[..., None]) + sharpened * subject_alpha[..., None]
+    # The subject remains the original pixels.  Do not sharpen it here: the
+    # old extra sharpening created a visible digital halo around the child.
     return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8), mode="RGB")
 
 
@@ -398,6 +414,9 @@ class Renderer:
         image = ImageEnhance.Contrast(image).enhance(1 + adjustments["contrast"])
         image = ImageEnhance.Color(image).enhance(1 + adjustments["saturation"])
         temperature = adjustments["temperature"]
+        auto_wb = recipe.get("auto_wb") or {}
+        if auto_wb.get("enabled") and "auto_wb" not in disabled_nodes:
+            temperature += auto_wb.get("temperature", 0)
         if temperature:
             color = (255, 145, 55) if temperature > 0 else (65, 140, 255)
             overlay = Image.new("RGB", image.size, color)
